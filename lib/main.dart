@@ -5,8 +5,16 @@ import 'package:flutter_appauth/flutter_appauth.dart';
 import 'package:cached_network_image/cached_network_image.dart';
 import 'package:flutter_secure_storage/flutter_secure_storage.dart';
 import 'package:http/http.dart' as http;
+import 'package:path/path.dart' as path;
 import 'dart:convert';
 import 'package:flutter_dotenv/flutter_dotenv.dart';
+import 'dart:io';
+import 'package:dio/dio.dart';
+import 'package:path_provider/path_provider.dart';
+import 'package:share_plus/share_plus.dart';
+import 'package:permission_handler/permission_handler.dart';
+import 'dart:typed_data';
+import 'package:flutter_image_gallery_saver/flutter_image_gallery_saver.dart';
 
 Future<void> main() async {
   await dotenv.load(fileName: ".env");
@@ -674,6 +682,7 @@ class OneDriveImage {
   final String name;
   final String downloadUrl;
   final String thumbnailUrl;
+  final String thumbnailUrlLarge;
   final DateTime takenDateTime;
 
   OneDriveImage({
@@ -681,6 +690,7 @@ class OneDriveImage {
     required this.name,
     required this.downloadUrl,
     required this.thumbnailUrl,
+    required this.thumbnailUrlLarge,
     required this.takenDateTime,
   });
 
@@ -691,6 +701,9 @@ class OneDriveImage {
       downloadUrl: json['@microsoft.graph.downloadUrl'],
       thumbnailUrl: json['thumbnails'] != null && json['thumbnails'].isNotEmpty
           ? json['thumbnails'][0]['small']['url']
+          : '',
+      thumbnailUrlLarge: json['thumbnails'] != null && json['thumbnails'].isNotEmpty
+          ? json['thumbnails'][0]['large']['url']
           : '',
       takenDateTime: DateTime.tryParse(json['photo']['takenDateTime'] ?? '') ?? DateTime.tryParse(json['CreatedDateTime']?? '') ?? DateTime(1970), // default
     );
@@ -778,7 +791,7 @@ class _OneDriveGalleryWidgetState extends State<OneDriveGalleryWidget> {
                   final image = images[index];
                   return GestureDetector(
                     onTap: () {
-                      showImageViewer(context, image);
+                      showImageViewer(context, images, index); 
                     },
                     child: CachedNetworkImage(
                       imageUrl: image.thumbnailUrl.isNotEmpty ? image.thumbnailUrl : image.downloadUrl,
@@ -797,88 +810,156 @@ class _OneDriveGalleryWidgetState extends State<OneDriveGalleryWidget> {
   }
 }
 
-void showImageViewer(BuildContext context, OneDriveImage image) {
+void showImageViewer(BuildContext context, List<OneDriveImage> images, int initialIndex) {
   showDialog(
     context: context,
+    barrierColor: Colors.black.withOpacity(0.95),
     barrierDismissible: true,
     builder: (context) {
-      return GestureDetector(
-        onTap: () => Navigator.of(context).pop(), // cerrar al tocar fuera
-        child: Scaffold(
-          backgroundColor: Colors.black.withOpacity(0.95),
-          body: SafeArea(
-            child: Stack(
+      PageController controller = PageController(initialPage: initialIndex);
+      int currentIndex = initialIndex;
+
+      return StatefulBuilder(
+        builder: (subContext, setState) {
+          return Scaffold(
+            backgroundColor: Colors.transparent,
+            body: Stack(
               children: [
-                Center(
-                  child: InteractiveViewer(
-                    panEnabled: true,
-                    minScale: 1,
-                    maxScale: 5,
-                    child: Hero(
-                      tag: image.id,
-                      child: Image.network(
-                        image.downloadUrl,
-                        fit: BoxFit.contain,
+                PageView.builder(
+                  controller: controller,
+                  itemCount: images.length,
+                  onPageChanged: (index) => setState(() => currentIndex = index),
+                  itemBuilder: (subContext, index) {
+                    final image = images[index];
+                    return InteractiveViewer(
+                      panEnabled: true,
+                      minScale: 1,
+                      maxScale: 5,
+                      child: Center(
+                        child: Hero(
+                          tag: image.id,
+                          child: Image.network(
+                            image.thumbnailUrlLarge.isNotEmpty ? image.thumbnailUrlLarge : image.downloadUrl,
+                            fit: BoxFit.contain,
+                          ),
+                        ),
                       ),
-                    ),
-                  ),
+                    );
+                  },
                 ),
                 Positioned(
-                  top: 10,
+                  top: MediaQuery.of(subContext).padding.top + 10,
                   left: 10,
                   child: IconButton(
                     icon: Icon(Icons.close, color: Colors.white, size: 28),
-                    onPressed: () => Navigator.of(context).pop(),
+                    onPressed: () => Navigator.of(subContext).pop(),
                   ),
                 ),
                 Positioned(
-                  bottom: 16,
+                  bottom: MediaQuery.of(subContext).padding.bottom + 16,
                   right: 16,
                   child: FloatingActionButton(
                     mini: true,
                     backgroundColor: Colors.white70,
                     onPressed: () {
-                      // TODO: Mostrar opciones como descargar, compartir, etc.
                       showModalBottomSheet(
-                        context: context,
-                        builder: (context) => _buildImageOptionsSheet(context, image),
+                        context: subContext,
+                        builder: (subContext) =>
+                            _buildImageOptionsSheet(context, images[currentIndex]),
+                        backgroundColor: Colors.white,
                       );
                     },
                     child: Icon(Icons.more_vert, color: Colors.black),
                   ),
-                )
+                ),
               ],
             ),
-          ),
-        ),
+          );
+        },
       );
     },
   );
 }
 
+
 Widget _buildImageOptionsSheet(BuildContext context, OneDriveImage image) {
   return Wrap(
     children: [
       ListTile(
-        leading: Icon(Icons.file_download),
+        leading: Icon(Icons.download),
         title: Text('Descargar'),
-        onTap: () {
-          Navigator.of(context).pop();
-          // TODO: lógica de descarga
+        onTap: () async {
+          Navigator.pop(context);
+          Future.microtask(() {
+            _downloadAndSaveImage(image, context); // se ejecuta en el siguiente ciclo de evento
+          });
         },
       ),
       ListTile(
         leading: Icon(Icons.share),
         title: Text('Compartir'),
-        onTap: () {
-          Navigator.of(context).pop();
-          // TODO: lógica de compartir
+        onTap: () async {
+          Navigator.pop(context);
+          Future.microtask(() {
+            _shareImage(image, context); // se ejecuta en el siguiente ciclo de evento
+          });
         },
       ),
     ],
   );
 }
 
+
+Future<File> _downloadImage(OneDriveImage image) async {
+  final dir = await getTemporaryDirectory(); // o getApplicationDocumentsDirectory()
+  final filePath = '${dir.path}/${image.name}';
+
+  final response = await Dio().download(image.downloadUrl, filePath);
+  if (response.statusCode == 200) {
+    return File(filePath);
+  } else {
+    throw Exception('Error al descargar imagen');
+  }
+}
+
+Future<void> _shareImage(OneDriveImage image, BuildContext context) async {
+  try {
+    final file = await _downloadImage(image);
+    await Share.shareXFiles([XFile(file.path)], text: image.name);
+  } catch (e) {
+    ScaffoldMessenger.of(context).showSnackBar(
+      SnackBar(content: Text('Error al compartir: $e')),
+    );
+  }
+}
+
+Future<void> _downloadAndSaveImage(OneDriveImage image, BuildContext context) async {
+    try {
+    // Pedir permiso si es necesario
+    if (await Permission.storage.request().isGranted || await Permission.photos.request().isGranted) {
+      final response = await http.get(Uri.parse(image.downloadUrl));
+      if (response.statusCode == 200) {
+        final Uint8List imageBytes = response.bodyBytes;
+
+        await FlutterImageGallerySaver.saveImage(imageBytes);
+
+        ScaffoldMessenger.of(context).showSnackBar(
+          SnackBar(content: Text('Imagen guardada en la galería')),
+        );
+      } else {
+        throw 'No se pudo descargar la imagen (status ${response.statusCode})';
+      }
+    } else {
+      ScaffoldMessenger.of(context).showSnackBar(
+        SnackBar(content: Text('Permiso denegado para guardar imagen')),
+      );
+    }
+  } catch (e) {
+    ScaffoldMessenger.of(context).showSnackBar(
+      SnackBar(content: Text('Error: $e')),
+    );
+  }
+}
 
 class BigCard extends StatelessWidget {
   const BigCard({
@@ -906,6 +987,3 @@ class BigCard extends StatelessWidget {
     );
   }
 }
-
-// TODO: https://devblogs.microsoft.com/ise/azure_ad_b2c_flutter/
-// Continuar con https://pub.dev/packages/flutter_appauth y probar el ejemplo
