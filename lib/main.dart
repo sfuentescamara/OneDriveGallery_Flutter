@@ -211,46 +211,61 @@ class GraphService {
       'Content-Type': 'application/json',
     };
     
-    String url;
+    String initialUrl;
     if (driveId != null && folderId != null) {
     // Carpeta dentro de un drive compartido
-      url = "https://graph.microsoft.com/v1.0/drives/$driveId/items/$folderId/children?\$expand=thumbnails";
+      initialUrl = "https://graph.microsoft.com/v1.0/drives/$driveId/items/$folderId/children?\$expand=thumbnails";
     } else if (folderId != null) {
       // Carpeta en tu propio drive
-      url = "$_baseUrl/items/$folderId/children?\$expand=thumbnails";
+      initialUrl = "$_baseUrl/items/$folderId/children?\$expand=thumbnails";
     } else {
       // Root de tu propio drive
-      url = "$_baseUrl/root/children?\$expand=thumbnails";
+      initialUrl = "$_baseUrl/root/children?\$expand=thumbnails";
     }
 
-    // Obtener archivos del directorio (root o carpeta específica)
-    final response = await http.get(Uri.parse(url), headers: headers);
-    if (response.statusCode != 200) {
-      throw Exception('Error al obtener archivos: ${response.statusCode} ${response.body}');
-    }
-    final Map<String, dynamic> jsonResponse = json.decode(response.body);
-    final List<Map<String, dynamic>> items =
-        List<Map<String, dynamic>>.from(jsonResponse['value']);
+    List<Map<String, dynamic>> allItems = [];
+    String? nextLink = initialUrl;
 
-    // Añadir archivos compartidos solo si estamos en el root del propio drive
-  if (folderId == null && driveId == null) {
+    while (nextLink != null) {
+      final response = await http.get(Uri.parse(nextLink), headers: headers);
+
+      if (response.statusCode == 200) {
+        final Map<String, dynamic> jsonResponse = json.decode(response.body);
+        final List<Map<String, dynamic>> currentItems =
+            List<Map<String, dynamic>>.from(jsonResponse['value']);
+        allItems.addAll(currentItems);
+        
+        // Verificar si hay una página siguiente
+        nextLink = jsonResponse['@odata.nextLink'];
+      } else {
+        print('Error al obtener archivos: ${response.statusCode} ${response.body}');
+        // Considera lanzar una excepción o manejar el error de otra forma
+        throw Exception('Error al obtener archivos: ${response.statusCode} ${response.body}');
+      }
+    }
+
+    // Añadir archivos compartidos solo si estamos en el root del propio drive y la solicitud inicial fue para el root.
+    // Esto se hace después de obtener todos los elementos paginados del drive principal.
+    if (folderId == null && driveId == null) {
       final sharedResponse = await http.get(
         Uri.parse("$_baseUrl/sharedWithMe"),
         headers: headers,
       );
-
+      // La API de sharedWithMe también puede estar paginada, aunque es menos común para la mayoría de los usuarios tener >200 elementos compartidos directamente.
+      // Para una solución completa, también deberías paginar aquí si es necesario.
+      // Por simplicidad, este ejemplo asume que sharedWithMe devuelve todo en una página o que la paginación no es crítica aquí.
       if (sharedResponse.statusCode == 200) {
         final Map<String, dynamic> sharedJson = json.decode(sharedResponse.body);
         final List<Map<String, dynamic>> sharedItems =
             List<Map<String, dynamic>>.from(sharedJson['value']);
-        items.addAll(sharedItems); // Añadir los compartidos a los normales
+        allItems.addAll(sharedItems); // Añadir los compartidos a los normales
       } else {
         // Si no se pudieron obtener los compartidos, puedes ignorarlo o lanzar un error si prefieres
         print("Error al obtener archivos compartidos: ${sharedResponse.statusCode} ${sharedResponse.body}");
       }
     }
 
-    return items;
+    return allItems;
   }
 
 }
@@ -580,46 +595,143 @@ class OneDriveExplorer extends StatefulWidget {
 
 class _OneDriveExplorerState extends State<OneDriveExplorer> {
   final List<OneDriveFolder> _folderStack = []; // Historial de carpetas
-  late Future<List<dynamic>> _itemsFuture;
+  // late Future<List<dynamic>> _itemsFuture; // Reemplazado por _itemsStream
+  Stream<List<dynamic>>? _itemsStream;
   late String? _folderName = 'OneDrive Explorer'; // Nombre de la carpeta actual
-  late OneDriveGallery _gallery = OneDriveGallery(imagesByDate: {}); // Galería de imágenes
+  // late OneDriveGallery _gallery = OneDriveGallery(imagesByDate: {}); // La galería se construirá dinámicamente
 
   @override
   void initState() {
     super.initState();
-    _itemsFuture = _fetchItems(); // Carga del directorio raíz
+    _itemsStream = _fetchItemsAsStream(); // Carga del directorio raíz
   }
 
-  Future<List<dynamic>> _fetchItems({String? folderId, String? driveId}) async {
-    final graphService = Provider.of<GraphService>(context, listen: false);
-    final itemsJson = await graphService.getDriveItems(folderId: folderId, driveId: driveId);
-    List<dynamic> items = [];
-    bool hasImages = false;
+  // Helper para construir la lista de items a emitir, incluyendo deduplicación y ordenamiento
+  List<dynamic> _buildDisplayList(
+    List<Map<String, dynamic>> childrenRawItems,
+    List<Map<String, dynamic>> sharedRemoteRawItems,
+  ) {
+    List<Map<String, dynamic>> allCombinedRawItems = [];
+    
+    // Usar un Map para deduplicar por ID mientras se combinan
+    Map<String, Map<String, dynamic>> uniqueRawItemsMap = {};
 
-      items = itemsJson.map((json) {
-      if (json.containsKey('folder')) {
-        return OneDriveFolder.fromJson(json);
-      } else if (json.containsKey('image')) {
-        hasImages = true;
-      } else if (json.containsKey('file')) {
-        return OneDriveFile.fromJson(json);
-      } else {
-        return null;
-      }
-    }).whereType<dynamic>().toList();
-
-    if (hasImages) {
-      _gallery = OneDriveGallery.fromDriveItems(itemsJson); // Agrupamos las imágenes por fecha
-      items.add(_gallery); // Añadimos la galería al final de la lista
+    for (var item in childrenRawItems) {
+      uniqueRawItemsMap[item['id']] = item;
     }
-    return items;
+    for (var item in sharedRemoteRawItems) {
+      uniqueRawItemsMap[item['id']] = item; // Asume que sharedRemoteRawItems ya son los remoteItem
+    }
+    allCombinedRawItems = uniqueRawItemsMap.values.toList();
+
+    List<dynamic> processedItems = [];
+    for (var rawItem in allCombinedRawItems) {
+      if (rawItem.containsKey('folder')) {
+        processedItems.add(OneDriveFolder.fromJson(rawItem));
+      } else if (rawItem.containsKey('file') && !rawItem.containsKey('image')) { // Archivos que no son imágenes
+        processedItems.add(OneDriveFile.fromJson(rawItem));
+      }
+      // Las imágenes se manejarán exclusivamente a través de la galería
+    }
+
+    // Crear y añadir galería si hay imágenes
+    List<Map<String, dynamic>> imageRawItemsForGallery = allCombinedRawItems.where((item) => item.containsKey('image')).toList();
+    if (imageRawItemsForGallery.isNotEmpty) {
+      OneDriveGallery gallery = OneDriveGallery.fromDriveItems(imageRawItemsForGallery);
+      if (gallery.imagesByDate.isNotEmpty) {
+        processedItems.add(gallery);
+      }
+    }
+    
+    // Ordenar: Carpetas primero, luego archivos, luego galería
+    processedItems.sort((a, b) {
+      if (a is OneDriveFolder && !(b is OneDriveFolder)) return -1;
+      if (!(a is OneDriveFolder) && b is OneDriveFolder) return 1;
+      if (a is OneDriveFile && b is OneDriveFile) return a.name.compareTo(b.name); // Ordenar archivos por nombre
+      if (a is OneDriveFile && !(b is OneDriveFile) && !(b is OneDriveFolder)) return -1;
+      if (!(a is OneDriveFile) && !(a is OneDriveFolder) && b is OneDriveFile) return 1;
+      if (a is OneDriveFolder && b is OneDriveFolder) return a.name.compareTo(b.name); // Ordenar carpetas por nombre
+      if (a is OneDriveGallery) return 1; // Galería al final
+      if (b is OneDriveGallery) return -1;
+      return 0;
+    });
+
+    return processedItems;
+  }
+
+  Stream<List<dynamic>> _fetchItemsAsStream({String? folderId, String? driveId}) async* {
+    final graphService = Provider.of<GraphService>(context, listen: false);
+    final token = await graphService.getToken();
+    if (token == null) {
+      yield []; // Emitir lista vacía si no hay token
+      return;
+    }
+    final headers = {'Authorization': 'Bearer $token', 'Content-Type': 'application/json'};
+    final String graphBaseUrl = "https://graph.microsoft.com/v1.0";
+
+    String childrenUrl;
+    if (driveId != null && folderId != null) {
+      childrenUrl = "$graphBaseUrl/drives/$driveId/items/$folderId/children?\$expand=thumbnails";
+    } else if (folderId != null) {
+      childrenUrl = "$graphBaseUrl/me/drive/items/$folderId/children?\$expand=thumbnails";
+    } else {
+      // Root de "Mis archivos"
+      childrenUrl = "$graphBaseUrl/me/drive/root/children?\$expand=thumbnails";
+    }
+
+    List<Map<String, dynamic>> accumulatedRawItemsFromChildren = [];
+    String? nextLinkChildren = childrenUrl;
+
+    while (nextLinkChildren != null) {
+      final response = await http.get(Uri.parse(nextLinkChildren), headers: headers);
+      if (response.statusCode == 200) {
+        final jsonResponse = json.decode(response.body);
+        final List<Map<String, dynamic>> currentPageRawItems = List.from(jsonResponse['value']);
+        accumulatedRawItemsFromChildren.addAll(currentPageRawItems);
+
+        yield _buildDisplayList(accumulatedRawItemsFromChildren, []); // Sin shared items aún
+
+        nextLinkChildren = jsonResponse['@odata.nextLink'];
+      } else {
+        print('Error al obtener items de la carpeta: ${response.statusCode} ${response.body}');
+        throw Exception('Error al obtener items de la carpeta: ${response.statusCode}');
+      }
+    }
+
+    // Si estamos en el root del drive personal, cargar también "sharedWithMe"
+    if (folderId == null && driveId == null) {
+      List<Map<String, dynamic>> accumulatedRawSharedRemoteItems = [];
+      String? nextLinkShared = "$graphBaseUrl/me/drive/sharedWithMe?\$expand=thumbnails";
+
+      while (nextLinkShared != null) {
+        final response = await http.get(Uri.parse(nextLinkShared), headers: headers);
+        if (response.statusCode == 200) {
+          final jsonResponse = json.decode(response.body);
+          final List<Map<String, dynamic>> currentPageSharedContainers = List.from(jsonResponse['value']);
+          
+          for (var container in currentPageSharedContainers) {
+            if (container['remoteItem'] is Map<String, dynamic>) {
+              accumulatedRawSharedRemoteItems.add(container['remoteItem'] as Map<String, dynamic>);
+            }
+          }
+          
+          yield _buildDisplayList(accumulatedRawItemsFromChildren, accumulatedRawSharedRemoteItems);
+
+          nextLinkShared = jsonResponse['@odata.nextLink'];
+        } else {
+          print("Error al obtener archivos compartidos: ${response.statusCode} ${response.body}");
+          // No lanzar excepción aquí para no interrumpir si solo fallan los compartidos
+          nextLinkShared = null; // Detener en caso de error
+        }
+      }
+    }
   }
 
   void _enterFolder(OneDriveFolder folder) {
     _folderName = folder.name; // Actualiza el nombre de la carpeta
     _folderStack.add(folder);
     setState(() {
-      _itemsFuture = _fetchItems(folderId: folder.id, driveId: folder.driveId);
+      _itemsStream = _fetchItemsAsStream(folderId: folder.id, driveId: folder.driveId);
     });
   }
 
@@ -632,7 +744,7 @@ class _OneDriveExplorerState extends State<OneDriveExplorer> {
       String? driveId = folder?.driveId;
 
       setState(() {
-        _itemsFuture = _fetchItems(folderId: folderId, driveId: driveId);
+        _itemsStream = _fetchItemsAsStream(folderId: folderId, driveId: driveId);
       });
     }
   }
@@ -649,20 +761,28 @@ class _OneDriveExplorerState extends State<OneDriveExplorer> {
               )
             : null,
       ),
-      body: FutureBuilder<List<dynamic>>(
-        future: _itemsFuture,
+      body: StreamBuilder<List<dynamic>>(
+        stream: _itemsStream,
         builder: (context, snapshot) {
-          if (snapshot.connectionState == ConnectionState.waiting) {
+          // Muestra indicador de carga si está esperando y no hay datos previos, o si está activo y no hay datos.
+          if ((snapshot.connectionState == ConnectionState.waiting && (!snapshot.hasData || snapshot.data!.isEmpty)) ||
+              (snapshot.connectionState == ConnectionState.active && (!snapshot.hasData || snapshot.data!.isEmpty))) {
             return Center(child: CircularProgressIndicator());
           } else if (snapshot.hasError) {
             return Center(child: Text('Error al cargar: ${snapshot.error}'));
           }
 
-          final items = snapshot.data!;
-          if (items.isEmpty) {
+          final items = snapshot.data ?? []; // Usar lista vacía si data es null
+
+          if (items.isEmpty && snapshot.connectionState == ConnectionState.done) {
             return Center(child: Text('Carpeta vacía'));
           }
-
+          
+          // Si hay items pero el stream sigue activo (cargando más en segundo plano),
+          // podríamos mostrar un indicador sutil, pero por ahora solo mostramos la lista.
+          // if (snapshot.connectionState == ConnectionState.active && items.isNotEmpty) {
+          //   // Podría añadirse un LinearProgressIndicator en la parte inferior, por ejemplo.
+          // }
           return ListView.builder(
             itemCount: items.length,
             itemBuilder: (context, index) {
