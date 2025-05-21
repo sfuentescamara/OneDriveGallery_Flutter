@@ -5,7 +5,6 @@ import 'package:flutter_appauth/flutter_appauth.dart';
 import 'package:cached_network_image/cached_network_image.dart';
 import 'package:flutter_secure_storage/flutter_secure_storage.dart';
 import 'package:http/http.dart' as http;
-import 'package:path/path.dart' as path;
 import 'dart:convert';
 import 'package:flutter_dotenv/flutter_dotenv.dart';
 import 'dart:io';
@@ -15,6 +14,7 @@ import 'package:share_plus/share_plus.dart';
 import 'package:permission_handler/permission_handler.dart';
 import 'dart:typed_data';
 import 'package:flutter_image_gallery_saver/flutter_image_gallery_saver.dart';
+import 'package:url_launcher/url_launcher.dart';
 
 Future<void> main() async {
   await dotenv.load(fileName: ".env");
@@ -68,6 +68,37 @@ class AuthService extends ChangeNotifier {
     await _storage.delete(key: 'access_token');
     notifyListeners(); // Notifica cambios
   }
+
+  // Método para reiniciar el flujo
+  Future<void> logoutAndAllowAccountChange(BuildContext context) async {
+    // Accedemos a la instancia singleton de GraphService para obtener los endpoints y redirectUri
+    final graphServiceInstance = GraphService();
+    final String postLogoutRedirectUri = graphServiceInstance.redirectUri;
+    final String endSessionUrl = graphServiceInstance.endSessionEndpoint;
+
+    final Uri logoutUri = Uri.parse(endSessionUrl).replace(
+      queryParameters: {
+        'post_logout_redirect_uri': postLogoutRedirectUri,
+      },
+    );
+
+    // 1. Abrir logout en el navegador para borrar la sesión real
+    if (await canLaunchUrl(logoutUri)) {
+      await launchUrl(
+        logoutUri,
+        mode: LaunchMode.externalApplication, // IMPORTANTE: navegador externo
+      );
+    } else {
+      print('Could not launch $logoutUri');
+      // Considerar mostrar un mensaje al usuario si no se puede abrir la URL de logout
+    }
+
+    // 2. Borrar credenciales locales (se hace después de intentar el logout en el navegador)
+    await _storage.delete(key: 'access_token');
+
+    // 3. Notificar a los listeners
+    notifyListeners();
+  }
 }
 
 class GraphService {
@@ -104,14 +135,20 @@ class GraphService {
   final String  endSessionEndpoint = 'https://login.microsoftonline.com/consumers/oauth2/v2.0/logout';
 
   // Guardar token de acceso
-  Future<String?> requestToken() async {
+  Future<String?> requestToken({bool promptSelectAccount = false}) async {
     try {
+      List<String>? promptValues;
+      if (promptSelectAccount) {
+        promptValues = ['select_account'];
+      }
+
       final AuthorizationTokenResponse? result = await appAuth.authorizeAndExchangeCode(
             AuthorizationTokenRequest(
               clientId,
               redirectUri,
               serviceConfiguration: AuthorizationServiceConfiguration(authorizationEndpoint: authorizationEndpoint,  tokenEndpoint: tokenEndpoint, endSessionEndpoint: endSessionEndpoint),
               scopes: scope,
+              promptValues: promptValues,
             ),
       );
       if (result != null && result.accessToken != null) {
@@ -396,6 +433,44 @@ class _LoginScreenState extends State<LoginScreen> {
                     });
                   },
                   child: Text(isLoggedIn ? 'Cerrar sesión' : 'Iniciar sesión'),
+                ),
+                ElevatedButton(
+                  onPressed: () async {
+                    if (_isLoading) return;
+
+                    setState(() {
+                      _isLoading = true;
+                    });
+
+                    // 1. Realizar el logout completo (navegador y local)
+                    await authService.logoutAndAllowAccountChange(context);
+
+                    // 2. Iniciar un nuevo flujo de login forzando la selección de cuenta
+                    String? token = await graphService.requestToken(promptSelectAccount: true);
+
+                    if (token != null) {
+                      await authService.saveToken(token);
+                      if (mounted) {
+                        ScaffoldMessenger.of(context).showSnackBar(
+                          SnackBar(content: Text("Sesión iniciada. Por favor, verifique la cuenta.")),
+                        );
+                      }
+                    } else {
+                      // El usuario pudo haber cancelado la selección de cuenta o hubo un error
+                      if (mounted) {
+                        ScaffoldMessenger.of(context).showSnackBar(
+                          SnackBar(content: Text("Proceso de cambio de cuenta cancelado o fallido.")),
+                        );
+                      }
+                    }
+
+                    if (mounted) {
+                      setState(() {
+                        _isLoading = false;
+                      });
+                    }
+                  },
+                  child: Text('Cambiar de cuenta'),
                 ),
               ]
             );
