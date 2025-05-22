@@ -53,7 +53,6 @@ class _LoginScreenState extends State<LoginScreen> {
                       } else {
                         String? token = await graphService.requestToken();
                         if (token != null) {
-                          await authService.saveToken(token);
                           ScaffoldMessenger.of(context).showSnackBar(
                             SnackBar(content: Text("Sesión iniciada")),
                           );
@@ -85,7 +84,6 @@ class _LoginScreenState extends State<LoginScreen> {
                       String? token = await graphService.requestToken(promptSelectAccount: true);
 
                       if (token != null) {
-                        await authService.saveToken(token);
                         if (mounted) {
                           ScaffoldMessenger.of(context).showSnackBar(
                             SnackBar(content: Text("Sesión iniciada. Por favor, verifique la cuenta.")),

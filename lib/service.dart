@@ -21,19 +21,30 @@ class AuthService extends ChangeNotifier {
   final FlutterSecureStorage _storage = FlutterSecureStorage();
 
   // Guardar token de acceso
-  Future<void> saveToken(String token) async {
-    await _storage.write(key: 'access_token', value: token);
+  Future<void> saveTokens({required String accessToken, String? refreshToken}) async {
+    await _storage.write(key: 'access_token', value: accessToken);
+    if (refreshToken != null) {
+      await _storage.write(key: 'refresh_token', value: refreshToken);
+    }
   }
 
   // Leer token de acceso
   Future<String?> getToken() async {
     return await _storage.read(key: 'access_token');
   }
+  // Leer refresh token
+  Future<String?> getRefreshToken() async {
+    return await _storage.read(key: 'refresh_token');
+  }
 
   // Verificar si hay un token guardado y si es válido
   Future<bool> get isLoggedIn async {
     String? token = await getToken();
-    return token != null && token.isNotEmpty; // Si el token no es nulo ni vacío, está logueado
+    // Para una verificación más robusta, podrías intentar validar el token aquí
+    // o simplemente verificar su existencia. Si tienes un refresh token,
+    // podrías considerar al usuario "potencialmente logueado".
+    // Por ahora, nos basamos en la existencia del access token.
+    return token != null && token.isNotEmpty;
   }
 
   // Método para cerrar sesión
@@ -68,6 +79,7 @@ class AuthService extends ChangeNotifier {
 
     // 2. Borrar credenciales locales (se hace después de intentar el logout en el navegador)
     await _storage.delete(key: 'access_token');
+    await _storage.delete(key: 'refresh_token');
 
     // 3. Notificar a los listeners
     notifyListeners();
@@ -107,7 +119,7 @@ class GraphService {
   final String tokenEndpoint = 'https://login.microsoftonline.com/consumers/oauth2/v2.0/token';
   final String endSessionEndpoint = 'https://login.microsoftonline.com/consumers/oauth2/v2.0/logout';
 
-  // Guardar token de acceso
+  // Solicitar tokens iniciales
   Future<String?> requestToken({bool promptSelectAccount = false}) async {
     try {
       List<String>? promptValues;
@@ -125,6 +137,10 @@ class GraphService {
         ),
       );
       if (result != null && result.accessToken != null) {
+        await _authService.saveTokens(
+          accessToken: result.accessToken!,
+          refreshToken: result.refreshToken,
+        );
         return result.accessToken;
       } else {
         print('Authentication result is null or missing access token');
@@ -134,6 +150,45 @@ class GraphService {
       print('Authentication error: $e');
       return null;
     }
+  }
+
+  // Refrescar el token de acceso usando el refresh token
+  Future<String?> refreshAccessToken() async {
+    print("Attempting to refresh access token...");
+    try {
+      final String? refreshToken = await _authService.getRefreshToken();
+      if (refreshToken == null) {
+        print('No refresh token available.');
+        await _authService.logout(); // No hay refresh token, forzar logout
+        return null;
+      }
+
+      final TokenResponse? result = await appAuth.token(
+        TokenRequest(
+          clientId,
+          redirectUri,
+          refreshToken: refreshToken,
+          serviceConfiguration: AuthorizationServiceConfiguration(authorizationEndpoint: authorizationEndpoint, tokenEndpoint: tokenEndpoint, endSessionEndpoint: endSessionEndpoint),
+          scopes: scope,
+        ),
+      );
+
+      if (result != null && result.accessToken != null) {
+        await _authService.saveTokens(
+          accessToken: result.accessToken!,
+          refreshToken: result.refreshToken ?? refreshToken, // Usar el nuevo refresh token si se proporciona, sino mantener el anterior
+        );
+        print("Access token refreshed successfully.");
+        return result.accessToken;
+      }
+    } catch (e) {
+      print('Error refreshing access token: $e');
+      await _authService.logoutAndAllowAccountChange(GlobalKey<NavigatorState>().currentContext ?? (throw Exception("No context available for logout"))); // Falló el refresh, forzar logout y permitir cambio de cuenta
+      return null;
+    }
+    print('Failed to refresh access token, result was null.');
+    await _authService.logoutAndAllowAccountChange(GlobalKey<NavigatorState>().currentContext ?? (throw Exception("No context available for logout")));
+    return null;
   }
 
   final String _baseUrl = "https://graph.microsoft.com/v1.0/me/drive/";
@@ -173,6 +228,41 @@ class GraphService {
     return files;
   }
 
+  // Wrapper para realizar solicitudes GET autenticadas con manejo de refresh token
+  Future<http.Response> _makeAuthenticatedGetRequest(String url, {Map<String, String>? currentHeaders}) async {
+    String? accessToken = await getToken();
+    if (accessToken == null) {
+      print('No access token found for request. User needs to login.');
+      // Podrías forzar un logout aquí o lanzar una excepción más específica
+      // await _authService.logout();
+      throw Exception('Authentication required. Please login.');
+    }
+
+    Map<String, String> headers = {
+      'Authorization': 'Bearer $accessToken',
+      'Content-Type': 'application/json',
+      ...(currentHeaders ?? {}),
+    };
+
+    http.Response response = await http.get(Uri.parse(url), headers: headers);
+
+    if (response.statusCode == 401) { // Token expirado o inválido
+      print('Access token expired or invalid (401). Attempting refresh...');
+      accessToken = await refreshAccessToken(); // Intenta refrescar el token
+      if (accessToken != null) {
+        print('Token refreshed. Retrying original request to $url');
+        headers['Authorization'] = 'Bearer $accessToken';
+        response = await http.get(Uri.parse(url), headers: headers); // Reintenta la solicitud
+      } else {
+        print('Failed to refresh token. Original request to $url failed permanently due to auth.');
+        // El refreshAccessToken ya maneja el logout si falla catastróficamente.
+        // Aquí podrías lanzar una excepción para que la UI reaccione si es necesario.
+        throw Exception('Session expired. Please login again.');
+      }
+    }
+    return response;
+  }
+
   Future<List<Map<String, dynamic>>> getDriveItems({
     String? folderId,
     String? driveId,
@@ -180,14 +270,10 @@ class GraphService {
     final token = await getToken();
     if (token == null) {
       // Si no hay token, no podemos hacer la solicitud.
-      // Podrías lanzar una excepción o devolver una lista vacía.
       print('Error: No access token found for getDriveItems');
+      // _makeAuthenticatedGetRequest se encargará de esto, pero es una buena doble verificación.
       return [];
     }
-    final headers = {
-      'Authorization': 'Bearer $token',
-      'Content-Type': 'application/json',
-    };
 
     String initialUrl;
     if (driveId != null && folderId != null) {
@@ -205,8 +291,7 @@ class GraphService {
     String? nextLink = initialUrl;
 
     while (nextLink != null) {
-      final response = await http.get(Uri.parse(nextLink), headers: headers);
-
+      final response = await _makeAuthenticatedGetRequest(nextLink); // Usar el wrapper
       if (response.statusCode == 200) {
         final Map<String, dynamic> jsonResponse = json.decode(response.body);
         final List<Map<String, dynamic>> currentItems =
@@ -216,19 +301,19 @@ class GraphService {
         // Verificar si hay una página siguiente
         nextLink = jsonResponse['@odata.nextLink'];
       } else {
-        print('Error al obtener archivos: ${response.statusCode} ${response.body}');
-        // Considera lanzar una excepción o manejar el error de otra forma
+        // Si _makeAuthenticatedGetRequest no pudo resolver un 401, o es otro error.
+        print('Error al obtener archivos (después de posible reintento): ${response.statusCode} ${response.body}');
         throw Exception('Error al obtener archivos: ${response.statusCode} ${response.body}');
       }
     }
 
     // Añadir archivos compartidos solo si estamos en el root del propio drive y la solicitud inicial fue para el root.
-    // Esto se hace después de obtener todos los elementos paginados del drive principal.
     if (folderId == null && driveId == null) {
-      final sharedResponse = await http.get(
-        Uri.parse("$_baseUrl/sharedWithMe"),
-        headers: headers,
-      );
+      // Nota: La URL para sharedWithMe también debería usar _makeAuthenticatedGetRequest
+      // Por simplicidad, y asumiendo que no es una llamada tan frecuente como para paginarla aquí,
+      // la dejamos con http.get directo, pero idealmente también usaría el wrapper.
+      // Para una solución más robusta, considera paginar sharedWithMe también.
+      final sharedResponse = await _makeAuthenticatedGetRequest("$_baseUrl/sharedWithMe");
       // La API de sharedWithMe también puede estar paginada, aunque es menos común para la mayoría de los usuarios tener >200 elementos compartidos directamente.
       // Para una solución completa, también deberías paginar aquí si es necesario.
       // Por simplicidad, este ejemplo asume que sharedWithMe devuelve todo en una página o que la paginación no es crítica aquí.

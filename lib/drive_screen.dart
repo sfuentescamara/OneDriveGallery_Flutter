@@ -166,6 +166,11 @@ class _OneDriveExplorerState extends State<OneDriveExplorer> {
         accumulatedRawItemsFromChildren.addAll(currentPageRawItems);
         yield _buildDisplayList(accumulatedRawItemsFromChildren, []);
         nextLinkChildren = jsonResponse['@odata.nextLink'];
+      } else if (response.statusCode == 401 && token != null) { // El token podría haber sido invalidado por el refresh
+        // El _makeAuthenticatedGetRequest dentro de _fetchItemsAsStream (si se usara allí) manejaría esto.
+        // Si no, y el refresh token falla, el usuario será deslogueado.
+        print('Error 401 obteniendo items de la carpeta, incluso después de posible refresh. El usuario debería ser deslogueado.');
+        throw Exception('Error de autenticación al obtener items de la carpeta.');
       } else {
         print('Error al obtener items de la carpeta: ${response.statusCode} ${response.body}');
         throw Exception('Error al obtener items de la carpeta: ${response.statusCode}');
@@ -188,6 +193,9 @@ class _OneDriveExplorerState extends State<OneDriveExplorer> {
           }
           yield _buildDisplayList(accumulatedRawItemsFromChildren, accumulatedRawSharedRemoteItems);
           nextLinkShared = jsonResponse['@odata.nextLink'];
+        } else if (response.statusCode == 401 && token != null) {
+          print('Error 401 obteniendo items compartidos. El usuario debería ser deslogueado.');
+          throw Exception('Error de autenticación al obtener items compartidos.');
         } else {
           print("Error al obtener archivos compartidos: ${response.statusCode} ${response.body}");
           nextLinkShared = null;
