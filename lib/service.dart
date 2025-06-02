@@ -195,31 +195,32 @@ class GraphService {
 
   // Obtener archivos desde OneDrive
   Future<List<dynamic>> getDriveFiles() async {
-    final token = await getToken();
-    final headers = {
-      'Authorization': 'Bearer $token',
-      'Content-Type': 'application/json',
-    };
-
     List<dynamic> files = [];
+    String? nextLinkRoot = "$_baseUrl/root/children?\$expand=thumbnails";
+    String? nextLinkShared = "$_baseUrl/sharedWithMe?\$expand=thumbnails";
 
     try {
-      // Solicitar archivos de la carpeta raíz
-      final response = await http.get(Uri.parse('$_baseUrl/root/children'), headers: headers);
+      // Solicitar archivos de la carpeta raíz con paginación y refresh de token
+      while (nextLinkRoot != null) {
+        final response = await _makeAuthenticatedGetRequest(nextLinkRoot);
+        if (response.statusCode == 200) {
+          var data = jsonDecode(response.body);
+          files.addAll(data['value']);
+          nextLinkRoot = data['@odata.nextLink'];
+        } else {
+          print('Failed to load root files: ${response.statusCode}');
+          nextLinkRoot = null; // Detener en caso de error
+        }
+      }
 
-      if (response.statusCode == 200) {
-        var data = jsonDecode(response.body);
-        files = data['value']; // Archivos en la carpeta raíz
-
-        // Obtener archivos compartidos
-        final sharedResponse = await http.get(Uri.parse('$_baseUrl/sharedWithMe'), headers: headers);
-
+      // Obtener archivos compartidos con paginación y refresh de token
+      while (nextLinkShared != null) {
+        final sharedResponse = await _makeAuthenticatedGetRequest(nextLinkShared);
         if (sharedResponse.statusCode == 200) {
           var sharedData = jsonDecode(sharedResponse.body);
-          files.addAll(sharedData['value']); // Archivos compartidos
+          files.addAll(sharedData['value'].map((item) => item['remoteItem'] ?? item).toList()); // Extraer remoteItem si existe
+          nextLinkShared = sharedData['@odata.nextLink'];
         }
-      } else {
-        print('Failed to load files');
       }
     } catch (e) {
       print('Error fetching files: $e');
@@ -309,22 +310,26 @@ class GraphService {
 
     // Añadir archivos compartidos solo si estamos en el root del propio drive y la solicitud inicial fue para el root.
     if (folderId == null && driveId == null) {
-      // Nota: La URL para sharedWithMe también debería usar _makeAuthenticatedGetRequest
-      // Por simplicidad, y asumiendo que no es una llamada tan frecuente como para paginarla aquí,
-      // la dejamos con http.get directo, pero idealmente también usaría el wrapper.
-      // Para una solución más robusta, considera paginar sharedWithMe también.
-      final sharedResponse = await _makeAuthenticatedGetRequest("$_baseUrl/sharedWithMe");
-      // La API de sharedWithMe también puede estar paginada, aunque es menos común para la mayoría de los usuarios tener >200 elementos compartidos directamente.
-      // Para una solución completa, también deberías paginar aquí si es necesario.
-      // Por simplicidad, este ejemplo asume que sharedWithMe devuelve todo en una página o que la paginación no es crítica aquí.
-      if (sharedResponse.statusCode == 200) {
-        final Map<String, dynamic> sharedJson = json.decode(sharedResponse.body);
-        final List<Map<String, dynamic>> sharedItems =
-            List<Map<String, dynamic>>.from(sharedJson['value']);
-        allItems.addAll(sharedItems); // Añadir los compartidos a los normales
-      } else {
-        // Si no se pudieron obtener los compartidos, puedes ignorarlo o lanzar un error si prefieres
-        print("Error al obtener archivos compartidos: ${sharedResponse.statusCode} ${sharedResponse.body}");
+      String? nextLinkShared = "$_baseUrl/sharedWithMe?\$expand=thumbnails";
+      while (nextLinkShared != null) {
+        final sharedResponse = await _makeAuthenticatedGetRequest(nextLinkShared);
+        if (sharedResponse.statusCode == 200) {
+          final Map<String, dynamic> sharedJson = json.decode(sharedResponse.body);
+          final List<Map<String, dynamic>> sharedItemsContainers =
+              List<Map<String, dynamic>>.from(sharedJson['value']);
+          
+          // Los items compartidos a menudo están dentro de 'remoteItem'
+          for (var container in sharedItemsContainers) {
+            if (container['remoteItem'] is Map<String, dynamic>) {
+              allItems.add(container['remoteItem'] as Map<String, dynamic>);
+            }
+          }
+          nextLinkShared = sharedJson['@odata.nextLink'];
+        } else {
+          print("Error al obtener archivos compartidos: ${sharedResponse.statusCode} ${sharedResponse.body}");
+          nextLinkShared = null; // Detener en caso de error
+          // Considerar si lanzar una excepción o continuar sin los compartidos
+        }
       }
     }
 
@@ -341,59 +346,84 @@ class GraphService {
     DateTime? folderCreatedDate;
     DateTime? folderLastModifiedDate;
 
-    String folderDetailsUrl;
-    String childrenBaseUrlForFilter;
+    String folderDetailsRelativeUrl;
+    String imageCountRelativeUrl;
+    String folderCountRelativeUrl;
 
     if (driveId != null && folderId != null) { // Carpeta en un drive compartido
-      folderDetailsUrl = "https://graph.microsoft.com/v1.0/drives/$driveId/items/$folderId?\$select=id,name,folder,createdDateTime,lastModifiedDateTime";
-      childrenBaseUrlForFilter = "https://graph.microsoft.com/v1.0/drives/$driveId/items/$folderId/children";
+      folderDetailsRelativeUrl = "/drives/$driveId/items/$folderId?\$select=id,name,folder,createdDateTime,lastModifiedDateTime";
+      imageCountRelativeUrl = "/drives/$driveId/items/$folderId/children?\$filter=image ne null&\$count=true&\$top=0";
+      folderCountRelativeUrl = "/drives/$driveId/items/$folderId/children?\$filter=folder ne null&\$count=true&\$top=0";
     } else if (folderId != null) { // Carpeta en el drive del usuario
-      folderDetailsUrl = "${_baseUrl}items/$folderId?\$select=id,name,folder,createdDateTime,lastModifiedDateTime";
-      childrenBaseUrlForFilter = "${_baseUrl}items/$folderId/children";
+      folderDetailsRelativeUrl = "/me/drive/items/$folderId?\$select=id,name,folder,createdDateTime,lastModifiedDateTime";
+      imageCountRelativeUrl = "/me/drive/items/$folderId/children?\$filter=image ne null&\$count=true&\$top=0";
+      folderCountRelativeUrl = "/me/drive/items/$folderId/children?\$filter=folder ne null&\$count=true&\$top=0";
     } else { // Root del drive del usuario
-      folderDetailsUrl = "${_baseUrl}root?\$select=id,name,folder,createdDateTime,lastModifiedDateTime";
-      childrenBaseUrlForFilter = "${_baseUrl}root/children";
+      folderDetailsRelativeUrl = "/me/drive/root?\$select=id,name,folder,createdDateTime,lastModifiedDateTime";
+      imageCountRelativeUrl = "/me/drive/root/children?\$filter=image ne null&\$count=true&\$top=0";
+      folderCountRelativeUrl = "/me/drive/root/children?\$filter=folder ne null&\$count=true&\$top=0";
     }
 
     try {
-      // Obtener detalles de la carpeta (para conteo total y fechas de la carpeta)
-      final folderResponse = await _makeAuthenticatedGetRequest(folderDetailsUrl);
-      if (folderResponse.statusCode == 200) {
-        final data = json.decode(folderResponse.body);
-        totalItems = data['folder']?['childCount'] ?? 0;
-        if (data['createdDateTime'] != null) {
-          folderCreatedDate = DateTime.tryParse(data['createdDateTime']);
-        }
-        if (data['lastModifiedDateTime'] != null) {
-          folderLastModifiedDate = DateTime.tryParse(data['lastModifiedDateTime']);
-        }
-      } else {
-        print("Error fetching folder details for metadata: ${folderResponse.statusCode} ${folderResponse.body}");
-      }
+      final batchRequestBody = {
+        "requests": [
+          {
+            "id": "1",
+            "method": "GET",
+            "url": folderDetailsRelativeUrl
+          },
+          {
+            "id": "2",
+            "method": "GET",
+            "url": imageCountRelativeUrl
+          },
+          {
+            "id": "3",
+            "method": "GET",
+            "url": folderCountRelativeUrl
+          }
+        ]
+      };
 
-      // Contar imágenes
-      final imageResponse = await _makeAuthenticatedGetRequest("$childrenBaseUrlForFilter?\$filter=image ne null&\$count=true&\$top=0");
-      if (imageResponse.statusCode == 200) {
-        final data = json.decode(imageResponse.body);
-        imageItems = data['@odata.count'] ?? 0;
-      } else {
-        print("Error fetching image count for metadata: ${imageResponse.statusCode} ${imageResponse.body}");
-      }
+      final batchResponse = await _makeAuthenticatedPostRequest("https://graph.microsoft.com/v1.0/\$batch", json.encode(batchRequestBody));
 
-      // Contar carpetas
-      final folderCountResponse = await _makeAuthenticatedGetRequest("$childrenBaseUrlForFilter?\$filter=folder ne null&\$count=true&\$top=0");
-      if (folderCountResponse.statusCode == 200) {
-        final data = json.decode(folderCountResponse.body);
-        folderItemsCount = data['@odata.count'] ?? 0;
+      if (batchResponse.statusCode == 200) {
+        final batchResults = json.decode(batchResponse.body);
+        for (var responseItem in batchResults['responses']) {
+          if (responseItem['status'] == 200) {
+            final body = responseItem['body'];
+            if (responseItem['id'] == '1') { // Folder details
+              totalItems = body['folder']?['childCount'] ?? 0;
+              if (body['createdDateTime'] != null) {
+                folderCreatedDate = DateTime.tryParse(body['createdDateTime']);
+              }
+              if (body['lastModifiedDateTime'] != null) {
+                folderLastModifiedDate = DateTime.tryParse(body['lastModifiedDateTime']);
+              }
+            } else if (responseItem['id'] == '2') { // Image count
+              imageItems = body['@odata.count'] ?? 0;
+            } else if (responseItem['id'] == '3') { // Folder count
+              folderItemsCount = body['@odata.count'] ?? 0;
+            }
+          } else {
+            print("Error in batch request item ${responseItem['id']}: ${responseItem['status']} ${responseItem['body']}");
+          }
+        }
       } else {
-        print("Error fetching folder count for metadata: ${folderCountResponse.statusCode} ${folderCountResponse.body}");
+        print("Error in \$batch request: ${batchResponse.statusCode} ${batchResponse.body}");
+        // Podrías lanzar una excepción aquí o intentar un fallback si es crítico
+        throw Exception("Failed to load folder metadata via batch: ${batchResponse.statusCode}");
       }
     } catch (e) {
       print("Exception in getFolderMetadataSummary: $e");
       throw Exception("Failed to load folder metadata: $e");
     }
 
-    int otherFileItems = totalItems - imageItems - folderItemsCount;
+    // Asegúrate de que los conteos sean no nulos antes de restar
+    totalItems = totalItems; // Ya asignado
+    imageItems = imageItems;
+    folderItemsCount = folderItemsCount;
+    int otherFileItems = totalItems - imageItems - folderItemsCount;    
     if (otherFileItems < 0) otherFileItems = 0;
 
     return {
@@ -405,4 +435,35 @@ class GraphService {
       'folderLastModifiedDate': folderLastModifiedDate,
     };
   }
+
+  // Wrapper para realizar solicitudes POST autenticadas (necesario para $batch)
+  Future<http.Response> _makeAuthenticatedPostRequest(String url, dynamic body, {Map<String, String>? currentHeaders}) async {
+    String? accessToken = await getToken();
+    if (accessToken == null) {
+      throw Exception('Authentication required. Please login.');
+    }
+
+    Map<String, String> headers = {
+      'Authorization': 'Bearer $accessToken',
+      'Content-Type': 'application/json', // Batch requests son JSON
+      ...(currentHeaders ?? {}),
+    };
+
+    http.Response response = await http.post(Uri.parse(url), headers: headers, body: body);
+
+    if (response.statusCode == 401) { // Token expirado o inválido
+      print('Access token expired or invalid (401) during POST. Attempting refresh...');
+      accessToken = await refreshAccessToken();
+      if (accessToken != null) {
+        print('Token refreshed. Retrying original POST request to $url');
+        headers['Authorization'] = 'Bearer $accessToken';
+        response = await http.post(Uri.parse(url), headers: headers, body: body);
+      } else {
+        print('Failed to refresh token. Original POST request to $url failed permanently due to auth.');
+        throw Exception('Session expired. Please login again.');
+      }
+    }
+    return response;
+  }
+
 }
