@@ -506,6 +506,8 @@ class OneDriveGalleryWidget extends StatefulWidget {
 class _OneDriveGalleryWidgetState extends State<OneDriveGalleryWidget> {
   double columns = 4;
   bool _isDateSortAscending = false; // false = descendente (más recientes primero), true = ascendente (más antiguas primero)
+  Set<String> _expandedDates = {}; // Almacena las claves de fecha que están completamente expandidas
+  static const int _initialImageLimit = 8;
 
   @override
   Widget build(BuildContext context) {
@@ -550,24 +552,29 @@ class _OneDriveGalleryWidgetState extends State<OneDriveGalleryWidget> {
         ...sortedDateEntries.map((entry) { // Usar las entradas ordenadas
           final date = entry.key;
           final images = entry.value; // Estas imágenes ya están ordenadas por takenDateTime
+          final bool isExpanded = _expandedDates.contains(date);
+          final List<OneDriveImage> displayImages =
+              isExpanded ? images : (images.length > _initialImageLimit ? images.sublist(0, _initialImageLimit) : images);
+
           return Column(
             crossAxisAlignment: CrossAxisAlignment.start,
             children: [
               Padding(
                 padding: const EdgeInsets.symmetric(vertical: 8.0, horizontal: 16),
-                child: Text(date, style: TextStyle(fontWeight: FontWeight.bold, fontSize: 16)),
+                child: Text("$date (${images.length} ${images.length == 1 ? 'imagen' : 'imágenes'})",
+                    style: TextStyle(fontWeight: FontWeight.bold, fontSize: 16)),
               ),
               GridView.builder(
                 shrinkWrap: true,
                 physics: NeverScrollableScrollPhysics(),
-                itemCount: images.length,
+                itemCount: displayImages.length,
                 gridDelegate: SliverGridDelegateWithFixedCrossAxisCount(
                   crossAxisCount: columns.round(),
                   crossAxisSpacing: 4,
                   mainAxisSpacing: 4,
                 ),
                 itemBuilder: (context, index) {
-                  final image = images[index];
+                  final image = displayImages[index];
                   return GestureDetector(
                     onTap: () {
                       showImageViewer(context, images, index);
@@ -581,6 +588,20 @@ class _OneDriveGalleryWidgetState extends State<OneDriveGalleryWidget> {
                   );
                 },
               ),
+              if (!isExpanded && images.length > _initialImageLimit)
+                Center(
+                  child: Padding(
+                    padding: const EdgeInsets.all(8.0),
+                    child: TextButton(
+                      child: Text('Mostrar ${images.length - _initialImageLimit} más'),
+                      onPressed: () {
+                        setState(() {
+                          _expandedDates.add(date);
+                        });
+                      },
+                    ),
+                  ),
+                ),
             ],
           );
         }).toList()
@@ -609,7 +630,10 @@ void showImageViewer(BuildContext context, List<OneDriveImage> images, int initi
                   itemCount: images.length,
                   onPageChanged: (index) => setState(() => currentIndex = index),
                   itemBuilder: (subContext, index) {
-                    final image = images[index];
+                    // Asegurarse de que el Hero tag sea único si las imágenes pueden tener el mismo ID en diferentes galerías
+                    // o si la misma imagen puede aparecer múltiples veces (aunque no es el caso aquí con OneDriveImage).
+                    // Para este contexto, el ID de la imagen debería ser suficiente.
+                    final image = images[currentIndex]; // Usar currentIndex para el Hero tag de la imagen actual visible
                     return InteractiveViewer(
                       panEnabled: true,
                       minScale: 1,
