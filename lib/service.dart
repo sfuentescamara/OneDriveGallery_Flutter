@@ -330,4 +330,79 @@ class GraphService {
 
     return allItems;
   }
+
+  Future<Map<String, dynamic>> getFolderMetadataSummary({
+    String? folderId,
+    String? driveId,
+  }) async {
+    int totalItems = 0;
+    int imageItems = 0;
+    int folderItemsCount = 0; // Renombrado para evitar colisión con la variable folderId
+    DateTime? folderCreatedDate;
+    DateTime? folderLastModifiedDate;
+
+    String folderDetailsUrl;
+    String childrenBaseUrlForFilter;
+
+    if (driveId != null && folderId != null) { // Carpeta en un drive compartido
+      folderDetailsUrl = "https://graph.microsoft.com/v1.0/drives/$driveId/items/$folderId?\$select=id,name,folder,createdDateTime,lastModifiedDateTime";
+      childrenBaseUrlForFilter = "https://graph.microsoft.com/v1.0/drives/$driveId/items/$folderId/children";
+    } else if (folderId != null) { // Carpeta en el drive del usuario
+      folderDetailsUrl = "${_baseUrl}items/$folderId?\$select=id,name,folder,createdDateTime,lastModifiedDateTime";
+      childrenBaseUrlForFilter = "${_baseUrl}items/$folderId/children";
+    } else { // Root del drive del usuario
+      folderDetailsUrl = "${_baseUrl}root?\$select=id,name,folder,createdDateTime,lastModifiedDateTime";
+      childrenBaseUrlForFilter = "${_baseUrl}root/children";
+    }
+
+    try {
+      // Obtener detalles de la carpeta (para conteo total y fechas de la carpeta)
+      final folderResponse = await _makeAuthenticatedGetRequest(folderDetailsUrl);
+      if (folderResponse.statusCode == 200) {
+        final data = json.decode(folderResponse.body);
+        totalItems = data['folder']?['childCount'] ?? 0;
+        if (data['createdDateTime'] != null) {
+          folderCreatedDate = DateTime.tryParse(data['createdDateTime']);
+        }
+        if (data['lastModifiedDateTime'] != null) {
+          folderLastModifiedDate = DateTime.tryParse(data['lastModifiedDateTime']);
+        }
+      } else {
+        print("Error fetching folder details for metadata: ${folderResponse.statusCode} ${folderResponse.body}");
+      }
+
+      // Contar imágenes
+      final imageResponse = await _makeAuthenticatedGetRequest("$childrenBaseUrlForFilter?\$filter=image ne null&\$count=true&\$top=0");
+      if (imageResponse.statusCode == 200) {
+        final data = json.decode(imageResponse.body);
+        imageItems = data['@odata.count'] ?? 0;
+      } else {
+        print("Error fetching image count for metadata: ${imageResponse.statusCode} ${imageResponse.body}");
+      }
+
+      // Contar carpetas
+      final folderCountResponse = await _makeAuthenticatedGetRequest("$childrenBaseUrlForFilter?\$filter=folder ne null&\$count=true&\$top=0");
+      if (folderCountResponse.statusCode == 200) {
+        final data = json.decode(folderCountResponse.body);
+        folderItemsCount = data['@odata.count'] ?? 0;
+      } else {
+        print("Error fetching folder count for metadata: ${folderCountResponse.statusCode} ${folderCountResponse.body}");
+      }
+    } catch (e) {
+      print("Exception in getFolderMetadataSummary: $e");
+      throw Exception("Failed to load folder metadata: $e");
+    }
+
+    int otherFileItems = totalItems - imageItems - folderItemsCount;
+    if (otherFileItems < 0) otherFileItems = 0;
+
+    return {
+      'totalItems': totalItems,
+      'imageItems': imageItems,
+      'folderItems': folderItemsCount,
+      'otherFileItems': otherFileItems,
+      'folderCreatedDate': folderCreatedDate,
+      'folderLastModifiedDate': folderLastModifiedDate,
+    };
+  }
 }

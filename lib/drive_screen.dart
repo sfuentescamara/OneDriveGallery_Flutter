@@ -82,11 +82,40 @@ class _OneDriveExplorerState extends State<OneDriveExplorer> {
   Stream<List<dynamic>>? _itemsStream;
   late String? _folderName = 'OneDrive Explorer'; // Nombre de la carpeta actual
 
+  bool _isLoadingMetadata = true;
+  Map<String, dynamic>? _folderMetadata;
+  String? _metadataError;
+
   @override
   void initState() {
     super.initState();
-    _itemsStream = _fetchItemsAsStream(); // Carga del directorio raíz
+    _loadMetadataAndItems(); // Carga inicial
   }
+
+  Future<void> _loadMetadataAndItems({String? folderId, String? driveId}) async {
+    setState(() {
+      _isLoadingMetadata = true;
+      _folderMetadata = null;
+      _metadataError = null;
+      _itemsStream = null; // Reiniciar stream de items mientras carga metadata
+    });
+    try {
+      final graphService = Provider.of<GraphService>(context, listen: false);
+      _folderMetadata = await graphService.getFolderMetadataSummary(folderId: folderId, driveId: driveId);
+      // Una vez cargada la metadata, iniciamos la carga de items
+      _itemsStream = _fetchItemsAsStream(folderId: folderId, driveId: driveId);
+    } catch (e) {
+      _metadataError = e.toString();
+      print("Error loading metadata: $e");
+    } finally {
+      if (mounted) {
+        setState(() {
+          _isLoadingMetadata = false;
+        });
+      }
+    }
+  }
+
 
   List<dynamic> _buildDisplayList(
     List<Map<String, dynamic>> childrenRawItems,
@@ -208,7 +237,7 @@ class _OneDriveExplorerState extends State<OneDriveExplorer> {
     _folderName = folder.name;
     _folderStack.add(folder);
     setState(() {
-      _itemsStream = _fetchItemsAsStream(folderId: folder.id, driveId: folder.driveId);
+      _loadMetadataAndItems(folderId: folder.id, driveId: folder.driveId);
     });
   }
 
@@ -220,7 +249,7 @@ class _OneDriveExplorerState extends State<OneDriveExplorer> {
       String? folderId = folder?.id;
       String? driveId = folder?.driveId;
       setState(() {
-        _itemsStream = _fetchItemsAsStream(folderId: folderId, driveId: driveId);
+        _loadMetadataAndItems(folderId: folderId, driveId: driveId);
       });
     }
   }
@@ -237,50 +266,123 @@ class _OneDriveExplorerState extends State<OneDriveExplorer> {
               )
             : null,
       ),
-      body: StreamBuilder<List<dynamic>>(
-        stream: _itemsStream,
-        builder: (context, snapshot) {
-          if ((snapshot.connectionState == ConnectionState.waiting && (!snapshot.hasData || snapshot.data!.isEmpty)) ||
-              (snapshot.connectionState == ConnectionState.active && (!snapshot.hasData || snapshot.data!.isEmpty))) {
-            return Center(child: CircularProgressIndicator());
-          } else if (snapshot.hasError) {
-            return Center(child: Text('Error al cargar: ${snapshot.error}'));
-          }
+      body: Column(
+        children: [
+          if (_isLoadingMetadata)
+            Padding(
+              padding: const EdgeInsets.all(8.0),
+              child: Center(child: CircularProgressIndicator(semanticsLabel: "Cargando metadatos...",)),
+            )
+          else if (_metadataError != null)
+            Padding(
+              padding: const EdgeInsets.all(8.0),
+              child: Text("Error al cargar metadatos: $_metadataError", style: TextStyle(color: Colors.red)),
+            )
+          else if (_folderMetadata != null)
+            // Padding(
+            //   padding: const EdgeInsets.all(8.0),
+            //   child: Wrap(
+            //     spacing: 8.0,
+            //     runSpacing: 4.0,
+            //     alignment: WrapAlignment.center,
+            //     children: [
+            //       Chip(label: Text('Total: ${_folderMetadata!['totalItems']}')),
+            //       if (_folderMetadata!['folderItems'] > 0)
+            //         Chip(label: Text('Carpetas: ${_folderMetadata!['folderItems']}')),
+            //       if (_folderMetadata!['imageItems'] > 0)
+            //         Chip(label: Text('Imágenes: ${_folderMetadata!['imageItems']}')),
+            //       if (_folderMetadata!['otherFileItems'] > 0)
+            //         Chip(label: Text('Archivos: ${_folderMetadata!['otherFileItems']}')),
+            //     ],
+            //   ),
+            // ),
+          Expanded(
+            child: _itemsStream == null && !_isLoadingMetadata
+                ? Center(child: Text(_metadataError == null ? "Iniciando carga de elementos..." : "No se pudieron cargar elementos."))
+                : StreamBuilder<List<dynamic>>(
+              stream: _itemsStream,
+              builder: (context, snapshot) {
+                if (snapshot.connectionState == ConnectionState.waiting && (!snapshot.hasData || snapshot.data!.isEmpty) && _itemsStream != null) {
+                  return Center(child: CircularProgressIndicator(semanticsLabel: "Cargando elementos..."));
+                } else if (snapshot.hasError) {
+                  return Center(child: Text('Error al cargar elementos: ${snapshot.error}'));
+                }
 
-          final items = snapshot.data ?? [];
+                final items = snapshot.data ?? [];
+                final bool metadataAvailable = _folderMetadata != null;
+                final int totalExpectedItems = metadataAvailable ? (_folderMetadata!['totalItems'] ?? 0) : 0;
+                
+                final bool activelyLoadingMoreItems = snapshot.connectionState == ConnectionState.active &&
+                                                  metadataAvailable &&
+                                                  totalExpectedItems > 0 &&
+                                                  items.length < totalExpectedItems;
 
-          if (items.isEmpty && snapshot.connectionState == ConnectionState.done) {
-            return Center(child: Text('Carpeta vacía'));
-          }
+                if (items.isEmpty) {
+                  if (snapshot.connectionState == ConnectionState.active) {
+                    if (metadataAvailable && totalExpectedItems > 0) {
+                      return Center(child: CircularProgressIndicator(semanticsLabel: "Cargando elementos..."));
+                    }
+                    if (metadataAvailable && totalExpectedItems == 0) {
+                      return Center(child: Text('Carpeta vacía'));
+                    }
+                    return Center(child: CircularProgressIndicator(semanticsLabel: "Cargando elementos..."));
+                  } else if (snapshot.connectionState == ConnectionState.done) {
+                    return Center(child: Text('Carpeta vacía'));
+                  }
+                  return Center(child: CircularProgressIndicator(semanticsLabel: "Iniciando..."));
+                }
 
-          return ListView.builder(
-            itemCount: items.length,
-            itemBuilder: (context, index) {
-              final item = items[index];
-              if (item is OneDriveFolder) {
-                return ListTile(
-                  leading: Icon(Icons.folder),
-                  title: Text(item.name),
-                  subtitle: Text('${item.childCount} elementos'),
-                  onTap: () => _enterFolder(item),
+                return Column(
+                  children: [
+                    if (activelyLoadingMoreItems)
+                      Padding(
+                        padding: const EdgeInsets.symmetric(vertical: 8.0, horizontal: 16.0),
+                        child: Column(
+                          children: [
+                            Text('Cargados: ${items.length} de $totalExpectedItems'),
+                            SizedBox(height: 4),
+                            LinearProgressIndicator(
+                              value: (totalExpectedItems > 0) ? items.length / totalExpectedItems : 0,
+                              backgroundColor: Colors.grey[300],
+                            ),
+                          ],
+                        ),
+                      ),
+                    Expanded(
+                      child: ListView.builder(
+                        itemCount: items.length,
+                        itemBuilder: (context, index) {
+                          final item = items[index];
+                          if (item is OneDriveFolder) {
+                            return ListTile(
+                              leading: Icon(Icons.folder),
+                              title: Text(item.name),
+                              subtitle: Text('${item.childCount} elementos'),
+                              onTap: () => _enterFolder(item),
+                            );
+                          } else if (item is OneDriveFile) {
+                            return ListTile(
+                              leading: Icon(Icons.insert_drive_file),
+                              title: Text(item.name),
+                              subtitle: Text('${item.size} bytes'),
+                              onTap: () {
+                                // Acción para archivos
+                              },
+                            );
+                          } else if (item is OneDriveGallery) {
+                            return OneDriveGalleryWidget(gallery: item);
+                          } else {
+                            return SizedBox.shrink();
+                          }
+                        },
+                      ),
+                    ),
+                  ],
                 );
-              } else if (item is OneDriveFile) {
-                return ListTile(
-                  leading: Icon(Icons.insert_drive_file),
-                  title: Text(item.name),
-                  subtitle: Text('${item.size} bytes'),
-                  onTap: () {
-                    // Acción para archivos
-                  },
-                );
-              } else if (item is OneDriveGallery) {
-                return OneDriveGalleryWidget(gallery: item);
-              } else {
-                return SizedBox.shrink();
-              }
-            },
-          );
-        },
+              },
+            ),
+          ),
+        ],
       ),
     );
   }
@@ -384,6 +486,11 @@ class OneDriveGallery {
         groupedImages[dateKey]!.add(image);
       }
     }
+    // Ordenar las imágenes dentro de cada grupo de fechas por su takenDateTime.
+    // Aquí se ordenan de más antiguas a más recientes. Cambia a.takenDateTime.compareTo(b.takenDateTime) por b.takenDateTime.compareTo(a.takenDateTime) para ordenarlas de más recientes a más antiguas.
+    groupedImages.forEach((key, imageList) {
+      imageList.sort((a, b) => a.takenDateTime.compareTo(b.takenDateTime));
+    });
     return OneDriveGallery(imagesByDate: groupedImages);
   }
 }
@@ -398,9 +505,22 @@ class OneDriveGalleryWidget extends StatefulWidget {
 
 class _OneDriveGalleryWidgetState extends State<OneDriveGalleryWidget> {
   double columns = 4;
+  bool _isDateSortAscending = false; // false = descendente (más recientes primero), true = ascendente (más antiguas primero)
 
   @override
   Widget build(BuildContext context) {
+    // Ordenar los grupos de fechas.
+    final sortedDateEntries = widget.gallery.imagesByDate.entries.toList()
+      ..sort((a, b) {
+        if (_isDateSortAscending) {
+          return a.key.compareTo(b.key); // Ascendente
+        } else {
+          return b.key.compareTo(a.key); // Descendente
+        }
+      });
+
+    final IconData sortIcon = _isDateSortAscending ? Icons.arrow_downward : Icons.arrow_upward;
+
     return Column(
       children: [
         Slider(
@@ -415,9 +535,21 @@ class _OneDriveGalleryWidgetState extends State<OneDriveGalleryWidget> {
             });
           },
         ),
-        ...widget.gallery.imagesByDate.entries.map((entry) {
+        TextButton.icon(
+          icon: Icon(sortIcon),
+          label: Text(_isDateSortAscending ? 'Fechas más antiguas primero' : 'Fechas más recientes primero'),
+          onPressed: () {
+            setState(() {
+              _isDateSortAscending = !_isDateSortAscending;
+            });
+          },
+          style: TextButton.styleFrom(
+            foregroundColor: Theme.of(context).textTheme.bodyLarge?.color, // Usa el color del texto del tema
+          ),
+        ),
+        ...sortedDateEntries.map((entry) { // Usar las entradas ordenadas
           final date = entry.key;
-          final images = entry.value;
+          final images = entry.value; // Estas imágenes ya están ordenadas por takenDateTime
           return Column(
             crossAxisAlignment: CrossAxisAlignment.start,
             children: [
