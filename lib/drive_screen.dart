@@ -11,6 +11,8 @@ import 'package:share_plus/share_plus.dart';
 import 'package:permission_handler/permission_handler.dart';
 import 'dart:typed_data';
 import 'package:flutter_image_gallery_saver/flutter_image_gallery_saver.dart';
+import 'package:video_player/video_player.dart';
+
 
 class DriveScreen extends StatelessWidget {
   @override
@@ -133,35 +135,42 @@ class _OneDriveExplorerState extends State<OneDriveExplorer> {
     allCombinedRawItems = uniqueRawItemsMap.values.toList();
 
     List<dynamic> processedItems = [];
+    List<Map<String, dynamic>> mediaItemsForGallery = [];
+
+    // Populate processedItems with Folders and Files, collect media items separately
     for (var rawItem in allCombinedRawItems) {
       if (rawItem.containsKey('folder')) {
         processedItems.add(OneDriveFolder.fromJson(rawItem));
-      } else if (rawItem.containsKey('file') && !rawItem.containsKey('image')) {
+      } else if (rawItem.containsKey('image') || rawItem.containsKey('video')) {
+        mediaItemsForGallery.add(rawItem); // Collect for single gallery
+      } else if (rawItem.containsKey('file')) { // Other non-media files
         processedItems.add(OneDriveFile.fromJson(rawItem));
       }
     }
 
-    List<Map<String, dynamic>> imageRawItemsForGallery =
-        allCombinedRawItems.where((item) => item.containsKey('image')).toList();
-    if (imageRawItemsForGallery.isNotEmpty) {
-      OneDriveGallery gallery = OneDriveGallery.fromDriveItems(imageRawItemsForGallery);
-      if (gallery.imagesByDate.isNotEmpty) {
+    // Create and add the single gallery object if there are media items
+    if (mediaItemsForGallery.isNotEmpty) {
+      OneDriveGallery gallery = OneDriveGallery.fromDriveItems(mediaItemsForGallery);
+      if (gallery.mediaByDate.isNotEmpty) {
         processedItems.add(gallery);
       }
     }
 
+    // Sort all items together
     processedItems.sort((a, b) {
       if (a is OneDriveFolder && !(b is OneDriveFolder)) return -1;
       if (!(a is OneDriveFolder) && b is OneDriveFolder) return 1;
-      if (a is OneDriveFile && b is OneDriveFile) return a.name.compareTo(b.name);
-      if (a is OneDriveFile && !(b is OneDriveFile) && !(b is OneDriveFolder)) return -1;
-      if (!(a is OneDriveFile) && !(a is OneDriveFolder) && b is OneDriveFile) return 1;
       if (a is OneDriveFolder && b is OneDriveFolder) return a.name.compareTo(b.name);
-      if (a is OneDriveGallery) return 1;
-      if (b is OneDriveGallery) return -1;
+
+      if (a is OneDriveFile && b is! OneDriveFile) return -1; // Files come after folders but before gallery
+      if (a is! OneDriveFile && b is OneDriveFile) return 1;
+      if (a is OneDriveFile && b is OneDriveFile) return a.name.compareTo(b.name);
+      
+      if (a is OneDriveGallery && b is! OneDriveGallery) return 1; // Gallery last
+      if (a is! OneDriveGallery && b is OneDriveGallery) return -1;
+
       return 0;
     });
-
     return processedItems;
   }
 
@@ -440,7 +449,7 @@ class OneDriveFile {
   }
 }
 
-class OneDriveImage {
+abstract class OneDrivePlayableMedia {
   final String id;
   final String name;
   final String downloadUrl;
@@ -448,13 +457,25 @@ class OneDriveImage {
   final String thumbnailUrlLarge;
   final DateTime takenDateTime;
 
-  OneDriveImage({
+  OneDrivePlayableMedia({
     required this.id,
     required this.name,
     required this.downloadUrl,
     required this.thumbnailUrl,
     required this.thumbnailUrlLarge,
     required this.takenDateTime,
+  });
+
+}
+
+class OneDriveImage extends OneDrivePlayableMedia {
+  OneDriveImage({
+    required super.id,
+    required super.name,
+    required super.downloadUrl,
+    required super.thumbnailUrl,
+    required super.thumbnailUrlLarge,
+    required super.takenDateTime,
   });
 
   factory OneDriveImage.fromJson(Map<String, dynamic> json) {
@@ -464,34 +485,67 @@ class OneDriveImage {
       downloadUrl: json['@microsoft.graph.downloadUrl'],
       thumbnailUrl: json['thumbnails'] != null && json['thumbnails'].isNotEmpty ? json['thumbnails'][0]['small']['url'] : '',
       thumbnailUrlLarge: json['thumbnails'] != null && json['thumbnails'].isNotEmpty ? json['thumbnails'][0]['large']['url'] : '',
-      takenDateTime: DateTime.tryParse(json['photo']['takenDateTime'] ?? '') ?? DateTime.tryParse(json['createdDateTime'] ?? '') ?? DateTime(1970),
+      takenDateTime: DateTime.tryParse(json['photo']?['takenDateTime'] ?? '') ?? DateTime.tryParse(json['createdDateTime'] ?? '') ?? DateTime(1970),
     );
   }
 }
 
-class OneDriveGallery {
-  final Map<String, List<OneDriveImage>> imagesByDate;
+class OneDriveVideo extends OneDrivePlayableMedia {
+  final int duration; // en milisegundos
 
-  OneDriveGallery({required this.imagesByDate});
+  OneDriveVideo({
+    required super.id,
+    required super.name,
+    required super.downloadUrl,
+    required super.thumbnailUrl,
+    required super.thumbnailUrlLarge,
+    required super.takenDateTime,
+    required this.duration,
+  });
+
+  factory OneDriveVideo.fromJson(Map<String, dynamic> json) {
+    return OneDriveVideo(
+      id: json['id'],
+      name: json['name'],
+      downloadUrl: json['@microsoft.graph.downloadUrl'],
+      thumbnailUrl: json['thumbnails'] != null && json['thumbnails'].isNotEmpty ? json['thumbnails'][0]['small']['url'] : '',
+      thumbnailUrlLarge: json['thumbnails'] != null && json['thumbnails'].isNotEmpty ? json['thumbnails'][0]['large']['url'] : '',
+      takenDateTime: DateTime.tryParse(json['video']?['takenDateTime'] ?? '') ?? DateTime.tryParse(json['createdDateTime'] ?? '') ?? DateTime(1970),
+      duration: json['video']?['duration'] ?? 0,
+    );
+  }
+}
+
+
+class OneDriveGallery {
+ final Map<String, List<OneDrivePlayableMedia>> mediaByDate;
+
+  OneDriveGallery({required this.mediaByDate});
 
   factory OneDriveGallery.fromDriveItems(List<Map<String, dynamic>> items) {
-    final Map<String, List<OneDriveImage>> groupedImages = {};
+    final Map<String, List<OneDrivePlayableMedia>> groupedMedia = {};
+
     for (var item in items) {
+      OneDrivePlayableMedia? mediaItem;
       if (item.containsKey('image')) {
-        final image = OneDriveImage.fromJson(item);
-        final dateKey = "${image.takenDateTime.year}-${image.takenDateTime.month.toString().padLeft(2, '0')}-${image.takenDateTime.day.toString().padLeft(2, '0')}";
-        if (!groupedImages.containsKey(dateKey)) {
-          groupedImages[dateKey] = [];
+                mediaItem = OneDriveImage.fromJson(item);
+      } else if (item.containsKey('video')) {
+        mediaItem = OneDriveVideo.fromJson(item);
+      }
+
+      if (mediaItem != null) {
+        final dateKey = "${mediaItem.takenDateTime.year}-${mediaItem.takenDateTime.month.toString().padLeft(2, '0')}-${mediaItem.takenDateTime.day.toString().padLeft(2, '0')}";
+        if (!groupedMedia.containsKey(dateKey)) {
+          groupedMedia[dateKey] = [];
         }
-        groupedImages[dateKey]!.add(image);
+        groupedMedia[dateKey]!.add(mediaItem);
       }
     }
-    // Ordenar las imágenes dentro de cada grupo de fechas por su takenDateTime.
-    // Aquí se ordenan de más antiguas a más recientes. Cambia a.takenDateTime.compareTo(b.takenDateTime) por b.takenDateTime.compareTo(a.takenDateTime) para ordenarlas de más recientes a más antiguas.
-    groupedImages.forEach((key, imageList) {
-      imageList.sort((a, b) => a.takenDateTime.compareTo(b.takenDateTime));
+    // Ordenar los media items dentro de cada grupo de fechas por su takenDateTime.
+    groupedMedia.forEach((key, mediaList) {
+      mediaList.sort((a, b) => a.takenDateTime.compareTo(b.takenDateTime)); // Antiguos primero
     });
-    return OneDriveGallery(imagesByDate: groupedImages);
+    return OneDriveGallery(mediaByDate: groupedMedia);
   }
 }
 
@@ -512,7 +566,7 @@ class _OneDriveGalleryWidgetState extends State<OneDriveGalleryWidget> {
   @override
   Widget build(BuildContext context) {
     // Ordenar los grupos de fechas.
-    final sortedDateEntries = widget.gallery.imagesByDate.entries.toList()
+    final sortedDateEntries = widget.gallery.mediaByDate.entries.toList()
       ..sort((a, b) {
         if (_isDateSortAscending) {
           return a.key.compareTo(b.key); // Ascendente
@@ -551,49 +605,67 @@ class _OneDriveGalleryWidgetState extends State<OneDriveGalleryWidget> {
         ),
         ...sortedDateEntries.map((entry) { // Usar las entradas ordenadas
           final date = entry.key;
-          final images = entry.value; // Estas imágenes ya están ordenadas por takenDateTime
+          final mediaItems = entry.value; // Estos media items ya están ordenados por takenDateTime
           final bool isExpanded = _expandedDates.contains(date);
-          final List<OneDriveImage> displayImages =
-              isExpanded ? images : (images.length > _initialImageLimit ? images.sublist(0, _initialImageLimit) : images);
+          final List<OneDrivePlayableMedia> displayMedia =
+              isExpanded ? mediaItems : (mediaItems.length > _initialImageLimit ? mediaItems.sublist(0, _initialImageLimit) : mediaItems);
 
           return Column(
             crossAxisAlignment: CrossAxisAlignment.start,
             children: [
               Padding(
                 padding: const EdgeInsets.symmetric(vertical: 8.0, horizontal: 16),
-                child: Text("$date (${images.length} ${images.length == 1 ? 'imagen' : 'imágenes'})",
+                child: Text("$date (${mediaItems.length} ${mediaItems.length == 1 ? 'elemento' : 'elementos'})",
                     style: TextStyle(fontWeight: FontWeight.bold, fontSize: 16)),
               ),
               GridView.builder(
                 shrinkWrap: true,
                 physics: NeverScrollableScrollPhysics(),
-                itemCount: displayImages.length,
+                itemCount: displayMedia.length,
                 gridDelegate: SliverGridDelegateWithFixedCrossAxisCount(
                   crossAxisCount: columns.round(),
                   crossAxisSpacing: 4,
                   mainAxisSpacing: 4,
                 ),
                 itemBuilder: (context, index) {
-                  final image = displayImages[index];
+                  final mediaItem = displayMedia[index];
                   return GestureDetector(
                     onTap: () {
-                      showImageViewer(context, images, index);
-                    },
-                    child: CachedNetworkImage(
-                      imageUrl: image.thumbnailUrl.isNotEmpty ? image.thumbnailUrl : image.downloadUrl,
-                      placeholder: (context, url) => Center(child: CircularProgressIndicator()),
-                      errorWidget: (context, url, error) => Icon(Icons.broken_image),
-                      fit: BoxFit.cover,
+                      if (mediaItem is OneDriveImage) {
+                        // Filtrar solo imágenes para el visor de imágenes
+                        final imagesOnly = mediaItems.whereType<OneDriveImage>().toList();
+                        final imageIndex = imagesOnly.indexOf(mediaItem);
+                        if (imageIndex != -1) {
+                          showImageViewer(context, imagesOnly, imageIndex);
+                        }
+                      } else if (mediaItem is OneDriveVideo) {
+                        // Aquí llamarías a showVideoPlayer
+                        showVideoPlayer(context, mediaItem);
+                        print('Abrir vídeo: ${mediaItem.name}');
+                      }                    },
+                    child: Stack(
+                      fit: StackFit.expand,
+                      children: [
+                        CachedNetworkImage(
+                          imageUrl: mediaItem.thumbnailUrl.isNotEmpty ? mediaItem.thumbnailUrl : mediaItem.downloadUrl, // Fallback a downloadUrl si no hay thumb
+                          placeholder: (context, url) => Center(child: CircularProgressIndicator()),
+                          errorWidget: (context, url, error) => Icon(Icons.broken_image),
+                          fit: BoxFit.cover,
+                        ),
+                        if (mediaItem is OneDriveVideo)
+                          Center(child: Icon(Icons.play_circle_fill, color: Colors.white70, size: 48)),
+                      ],
+
                     ),
                   );
                 },
               ),
-              if (!isExpanded && images.length > _initialImageLimit)
+              if (!isExpanded && mediaItems.length > _initialImageLimit)
                 Center(
                   child: Padding(
                     padding: const EdgeInsets.all(8.0),
                     child: TextButton(
-                      child: Text('Mostrar ${images.length - _initialImageLimit} más'),
+                      child: Text('Mostrar ${mediaItems.length - _initialImageLimit} más'),
                       onPressed: () {
                         setState(() {
                           _expandedDates.add(date);
@@ -669,7 +741,7 @@ void showImageViewer(BuildContext context, List<OneDriveImage> images, int initi
                     onPressed: () {
                       showModalBottomSheet(
                         context: subContext,
-                        builder: (bsContext) => _buildImageOptionsSheet(bsContext, images[currentIndex]), // Pasar bsContext
+                        builder: (bsContext) => _buildMediaOptionsSheet(bsContext, images[currentIndex]), // Pasar bsContext
                         backgroundColor: Colors.white,
                       );
                     },
@@ -685,7 +757,7 @@ void showImageViewer(BuildContext context, List<OneDriveImage> images, int initi
   );
 }
 
-Widget _buildImageOptionsSheet(BuildContext context, OneDriveImage image) {
+Widget _buildMediaOptionsSheet(BuildContext context, OneDrivePlayableMedia mediaItem) {
   return Wrap(
     children: [
       ListTile(
@@ -693,7 +765,7 @@ Widget _buildImageOptionsSheet(BuildContext context, OneDriveImage image) {
         title: Text('Descargar'),
         onTap: () async {
           Navigator.pop(context); // Cerrar el BottomSheet
-          _downloadAndSaveImage(image, context); // Usar el context original para ScaffoldMessenger
+          _downloadAndSaveMedia(mediaItem, context); // Usar el context original para ScaffoldMessenger
         },
       ),
       ListTile(
@@ -701,13 +773,13 @@ Widget _buildImageOptionsSheet(BuildContext context, OneDriveImage image) {
         title: Text('Compartir'),
         onTap: () async {
           Navigator.pop(context); // Cerrar el BottomSheet
-          _shareImage(image, context); // Usar el context original para ScaffoldMessenger
+          _shareMedia(mediaItem, context); // Usar el context original para ScaffoldMessenger
         },
       ),
     ],
   );
 }
-
+/*
 Future<File> _downloadImage(OneDriveImage image) async {
   final dir = await getTemporaryDirectory();
   final filePath = '${dir.path}/${Uri.encodeComponent(image.name)}'; // Encode name
@@ -719,11 +791,25 @@ Future<File> _downloadImage(OneDriveImage image) async {
     throw Exception('Error al descargar imagen: ${response.statusCode}');
   }
 }
+*/
+Future<File> _downloadMediaItem(OneDrivePlayableMedia mediaItem) async {
+  final dir = await getTemporaryDirectory();
+  // Asegurar que el nombre de archivo sea único o tenga la extensión correcta si es necesario
+  final fileName = mediaItem.name.contains('.') ? mediaItem.name : '${mediaItem.name}${mediaItem is OneDriveVideo ? ".mp4" : ".jpg"}';
+  final filePath = '${dir.path}/${Uri.encodeComponent(fileName)}';
 
-Future<void> _shareImage(OneDriveImage image, BuildContext context) async {
+  final response = await dio_package.Dio().download(mediaItem.downloadUrl, filePath);
+  if (response.statusCode == 200) {
+    return File(filePath);
+  } else {
+    throw Exception('Error al descargar media: ${response.statusCode}');
+  }
+}
+
+Future<void> _shareMedia(OneDrivePlayableMedia mediaItem, BuildContext context) async {
   try {
-    final file = await _downloadImage(image);
-    await Share.shareXFiles([XFile(file.path)], text: image.name);
+    final file = await _downloadMediaItem(mediaItem);
+    await Share.shareXFiles([XFile(file.path)], text: mediaItem.name);
   } catch (e) {
     if (context.mounted) {
       ScaffoldMessenger.of(context).showSnackBar(
@@ -733,20 +819,30 @@ Future<void> _shareImage(OneDriveImage image, BuildContext context) async {
   }
 }
 
-Future<void> _downloadAndSaveImage(OneDriveImage image, BuildContext context) async {
+Future<void> _downloadAndSaveMedia(OneDrivePlayableMedia mediaItem, BuildContext context) async {
   try {
     if (await Permission.storage.request().isGranted || await Permission.photos.request().isGranted) {
-      final response = await http.get(Uri.parse(image.downloadUrl));
+      final response = await http.get(Uri.parse(mediaItem.downloadUrl));
       if (response.statusCode == 200) {
-        final Uint8List imageBytes = response.bodyBytes;
-        await FlutterImageGallerySaver.saveImage(imageBytes); // Añadir nombre
+        final Uint8List fileBytes = response.bodyBytes;
+        if (mediaItem is OneDriveImage) {
+          await FlutterImageGallerySaver.saveImage(fileBytes);
+        } else if (mediaItem is OneDriveVideo) {
+          // Para guardar vídeos, es mejor descargarlos a un archivo temporal primero
+          // y luego usar saveFile, ya que saveImage es específico para imágenes.
+          final tempDir = await getTemporaryDirectory();
+          final tempFile = File('${tempDir.path}/${mediaItem.name}');
+          await tempFile.writeAsBytes(fileBytes);
+          await FlutterImageGallerySaver.saveFile(tempFile.path);
+          await tempFile.delete(); // Limpiar archivo temporal
+        }
         if (context.mounted) {
           ScaffoldMessenger.of(context).showSnackBar(
-            SnackBar(content: Text('Imagen guardada en la galería')),
+            SnackBar(content: Text('${mediaItem is OneDriveImage ? 'Imagen' : 'Vídeo'} guardado en la galería')),
           );
         }
       } else {
-        throw 'No se pudo descargar la imagen (status ${response.statusCode})';
+        throw 'No se pudo descargar el media (status ${response.statusCode})';
       }
     } else {
       if (context.mounted) {
@@ -761,5 +857,71 @@ Future<void> _downloadAndSaveImage(OneDriveImage image, BuildContext context) as
         SnackBar(content: Text('Error al guardar: $e')),
       );
     }
+  }
+}
+
+// Placeholder para el reproductor de vídeo
+void showVideoPlayer(BuildContext context, OneDriveVideo video) {
+  Navigator.push(context, MaterialPageRoute(builder: (_) => VideoPlayerScreen(video: video)));
+}
+
+class VideoPlayerScreen extends StatefulWidget {
+  final OneDriveVideo video;
+
+  const VideoPlayerScreen({Key? key, required this.video}) : super(key: key);
+
+  @override
+  _VideoPlayerScreenState createState() => _VideoPlayerScreenState();
+}
+
+class _VideoPlayerScreenState extends State<VideoPlayerScreen> {
+  late VideoPlayerController _controller;
+  late Future<void> _initializeVideoPlayerFuture;
+
+  @override
+  void initState() {
+    super.initState();
+    _controller = VideoPlayerController.networkUrl(Uri.parse(widget.video.downloadUrl));
+    _initializeVideoPlayerFuture = _controller.initialize().then((_) {
+      // Asegura que el primer frame se muestre después de que el vídeo se inicialice
+      setState(() {});
+    });
+    _controller.setLooping(true);
+  }
+
+  @override
+  void dispose() {
+    _controller.dispose();
+    super.dispose();
+  }
+
+  @override
+  Widget build(BuildContext context) {
+    return Scaffold(
+      appBar: AppBar(title: Text(widget.video.name)),
+      body: FutureBuilder(
+        future: _initializeVideoPlayerFuture,
+        builder: (context, snapshot) {
+          if (snapshot.connectionState == ConnectionState.done) {
+            return Center(
+              child: AspectRatio(
+                aspectRatio: _controller.value.aspectRatio,
+                child: VideoPlayer(_controller),
+              ),
+            );
+          } else {
+            return Center(child: CircularProgressIndicator());
+          }
+        },
+      ),
+      floatingActionButton: FloatingActionButton(
+        onPressed: () {
+          setState(() {
+            _controller.value.isPlaying ? _controller.pause() : _controller.play();
+          });
+        },
+        child: Icon(_controller.value.isPlaying ? Icons.pause : Icons.play_arrow),
+      ),
+    );
   }
 }
