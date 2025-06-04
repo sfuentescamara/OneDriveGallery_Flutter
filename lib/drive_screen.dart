@@ -174,14 +174,16 @@ class _OneDriveExplorerState extends State<OneDriveExplorer> with AutomaticKeepA
       final metadata = await graphService.getFolderMetadataSummary(folderId: folderId, driveId: driveId);
       if (mounted) {
         setState(() {
-          _folderMetadata = metadata;
-          // Actualizar _folderName con el nombre obtenido de los metadatos
-          // Si es la raíz, usar un nombre por defecto. Si es un favorito, su nombre ya está en _currentEntryPointInfo o se actualiza.
-          _folderName = metadata['name'] as String? ??
-              (folderId == null && driveId == null
-                  ? 'OneDrive Explorer'
-                  : _currentEntryPointInfo?.name ?? 'Carpeta');
+          String? nameFromMetadata = metadata['name'] as String?;
+          if (nameFromMetadata != null) {
+            _folderName = nameFromMetadata;
+          } else if (folderId == null && driveId == null) {
+            _folderName = 'OneDrive Explorer'; // Asegurar el nombre de la raíz si metadata['name'] es nulo
+          }
+          // Si metadata['name'] es nulo y no es la raíz, mantenemos el _folderName
+          // que ya se estableció en el método de navegación (_enterFolder, _goBack, _goToRoot).
         });
+
       }
       _itemsStream = _fetchItemsAsStream(folderId: folderId, driveId: driveId);
     } catch (e) {
@@ -329,16 +331,16 @@ class _OneDriveExplorerState extends State<OneDriveExplorer> with AutomaticKeepA
         if (_folderStack.isNotEmpty) {
           // Si la pila aún tiene elementos, el último es la carpeta a la que volvemos
           final parentFolderToDisplay = _folderStack.last;
-          // _folderName se actualizará por _loadMetadataAndItems
+          _folderName = parentFolderToDisplay.name; // Actualizar nombre inmediatamente
           _loadMetadataAndItems(folderId: parentFolderToDisplay.id, driveId: parentFolderToDisplay.driveId);
         } else {
           // La pila está vacía, volvemos al punto de entrada original (raíz o favorito)
           if (_currentEntryPointInfo != null) {
-            // _folderName se actualizará por _loadMetadataAndItems
+            _folderName = _currentEntryPointInfo!.name; // Actualizar nombre inmediatamente
             _loadMetadataAndItems(folderId: _currentEntryPointInfo!.id, driveId: _currentEntryPointInfo!.driveId);
           } else {
             // El punto de entrada era la raíz real
-            // _folderName se actualizará por _loadMetadataAndItems
+            _folderName = 'OneDrive Explorer'; // Nombre por defecto para la raíz
             _loadMetadataAndItems(folderId: null, driveId: null);
           }
         }
@@ -350,7 +352,7 @@ class _OneDriveExplorerState extends State<OneDriveExplorer> with AutomaticKeepA
     setState(() {
       _currentEntryPointInfo = null; // La raíz es el nuevo punto de entrada
       _folderStack.clear();
-      // _folderName se actualizará por _loadMetadataAndItems
+      _folderName = 'OneDrive Explorer'; // Nombre por defecto para la raíz
       // Cargar metadatos y elementos para la raíz (sin folderId ni driveId)
       _loadMetadataAndItems();
     });
