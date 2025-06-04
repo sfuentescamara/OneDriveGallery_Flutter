@@ -202,7 +202,7 @@ class GraphService {
     try {
       // Solicitar archivos de la carpeta raíz con paginación y refresh de token
       while (nextLinkRoot != null) {
-        final response = await _makeAuthenticatedGetRequest(nextLinkRoot);
+        final response = await sendAuthenticatedGetRequest(nextLinkRoot);
         if (response.statusCode == 200) {
           var data = jsonDecode(response.body);
           files.addAll(data['value']);
@@ -215,7 +215,7 @@ class GraphService {
 
       // Obtener archivos compartidos con paginación y refresh de token
       while (nextLinkShared != null) {
-        final sharedResponse = await _makeAuthenticatedGetRequest(nextLinkShared);
+        final sharedResponse = await sendAuthenticatedGetRequest(nextLinkShared);
         if (sharedResponse.statusCode == 200) {
           var sharedData = jsonDecode(sharedResponse.body);
           files.addAll(sharedData['value'].map((item) => item['remoteItem'] ?? item).toList()); // Extraer remoteItem si existe
@@ -230,7 +230,8 @@ class GraphService {
   }
 
   // Wrapper para realizar solicitudes GET autenticadas con manejo de refresh token
-  Future<http.Response> _makeAuthenticatedGetRequest(String url, {Map<String, String>? currentHeaders}) async {
+  // Lo hacemos público para que pueda ser usado por _fetchItemsAsStream en drive_screen.dart
+  Future<http.Response> sendAuthenticatedGetRequest(String url, {Map<String, String>? currentHeaders}) async {
     String? accessToken = await getToken();
     if (accessToken == null) {
       print('No access token found for request. User needs to login.');
@@ -292,7 +293,7 @@ class GraphService {
     String? nextLink = initialUrl;
 
     while (nextLink != null) {
-      final response = await _makeAuthenticatedGetRequest(nextLink); // Usar el wrapper
+      final response = await sendAuthenticatedGetRequest(nextLink); // Usar el wrapper
       if (response.statusCode == 200) {
         final Map<String, dynamic> jsonResponse = json.decode(response.body);
         final List<Map<String, dynamic>> currentItems =
@@ -312,7 +313,7 @@ class GraphService {
     if (folderId == null && driveId == null) {
       String? nextLinkShared = "$_baseUrl/sharedWithMe?\$expand=thumbnails";
       while (nextLinkShared != null) {
-        final sharedResponse = await _makeAuthenticatedGetRequest(nextLinkShared);
+        final sharedResponse = await sendAuthenticatedGetRequest(nextLinkShared);
         if (sharedResponse.statusCode == 200) {
           final Map<String, dynamic> sharedJson = json.decode(sharedResponse.body);
           final List<Map<String, dynamic>> sharedItemsContainers =

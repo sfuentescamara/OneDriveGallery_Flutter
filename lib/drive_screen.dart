@@ -12,6 +12,7 @@ import 'package:permission_handler/permission_handler.dart';
 import 'dart:typed_data';
 import 'package:flutter_image_gallery_saver/flutter_image_gallery_saver.dart';
 import 'package:video_player/video_player.dart';
+import 'main.dart'; // Para MyAppState y FavoriteFolderIdentifier
 
 
 class DriveScreen extends StatelessWidget {
@@ -75,23 +76,89 @@ class DriveScreen extends StatelessWidget {
 }
 
 class OneDriveExplorer extends StatefulWidget {
+  // Añadir el constructor con Key
+  const OneDriveExplorer({Key? key}) : super(key: key);
+
   @override
   _OneDriveExplorerState createState() => _OneDriveExplorerState();
 }
 
-class _OneDriveExplorerState extends State<OneDriveExplorer> {
+class _OneDriveExplorerState extends State<OneDriveExplorer> with AutomaticKeepAliveClientMixin<OneDriveExplorer> {
+  @override
+  bool get wantKeepAlive => true; // Para mantener el estado del widget
+
   final List<OneDriveFolder> _folderStack = []; // Historial de carpetas
   Stream<List<dynamic>>? _itemsStream;
   late String? _folderName = 'OneDrive Explorer'; // Nombre de la carpeta actual
 
   bool _isLoadingMetadata = true;
   Map<String, dynamic>? _folderMetadata;
+  bool _isAtRealRoot = true; // Para rastrear si la vista actual es la raíz real de OneDrive
+  FavoriteFolderIdentifier? _currentEntryPointInfo; // Información del punto de entrada actual (si es un favorito)
   String? _metadataError;
 
   @override
   void initState() {
     super.initState();
-    _loadMetadataAndItems(); // Carga inicial
+    // La carga inicial se hará si folderToOpenFromFavorites es null la primera vez
+    // o si _handleOpenFromFavorites no se dispara con una carpeta específica.
+    // Para asegurar la carga inicial si no hay navegación desde favoritos:
+    final appState = Provider.of<MyAppState>(context, listen: false);
+    if (appState.folderToOpenFromFavorites == null) {
+      _currentEntryPointInfo = null; // La raíz es el punto de entrada
+      _loadMetadataAndItems();
+    }
+    appState.addListener(_handleOpenFromFavorites);
+  }
+
+  @override
+  void dispose() {
+    Provider.of<MyAppState>(context, listen: false).removeListener(_handleOpenFromFavorites);
+    super.dispose();
+  }
+
+  void _handleOpenFromFavorites() {
+    final appState = Provider.of<MyAppState>(context, listen: false);
+    if (appState.folderToOpenFromFavorites != null && mounted) {
+      final folderToOpen = appState.folderToOpenFromFavorites!;
+
+      // Opcional: Evitar recarga si ya estamos en la carpeta destino
+      FavoriteFolderIdentifier? currentFolderId = _getCurrentFolderIdentifier();
+      if (currentFolderId?.id == folderToOpen.id && currentFolderId?.driveId == folderToOpen.driveId) {
+        appState.clearFolderToOpenFromFavorites(); // Limpiar la señal
+        return; // Ya estamos aquí, no hacer nada más
+      }
+
+      setState(() { // Asegurar que los cambios de UI (como _folderName) se reflejen
+        _currentEntryPointInfo = folderToOpen; // Establecer el favorito como punto de entrada
+        _folderStack.clear();
+        _folderName = folderToOpen.name;
+
+        if (folderToOpen.id == 'root' && folderToOpen.driveId == null) {
+          _loadMetadataAndItems();
+        } else {
+          _loadMetadataAndItems(folderId: folderToOpen.id, driveId: folderToOpen.driveId);
+        }
+      });
+      appState.clearFolderToOpenFromFavorites();
+    }
+  }
+
+  // didChangeDependencies se puede mantener si se usa para otras cosas,
+  // pero la lógica de folderToOpenFromFavorites ahora está en _handleOpenFromFavorites.
+
+  FavoriteFolderIdentifier? _getCurrentFolderIdentifier() {
+    if (_folderStack.isEmpty) {
+      // Raíz del drive personal
+      return FavoriteFolderIdentifier(id: 'root', name: _folderName ?? 'OneDrive');
+    } else {
+      final currentFolder = _folderStack.last;
+      return FavoriteFolderIdentifier(
+        id: currentFolder.id,
+        driveId: currentFolder.driveId, // driveId puede ser null
+        name: currentFolder.name,
+      );
+    }
   }
 
   Future<void> _loadMetadataAndItems({String? folderId, String? driveId}) async {
@@ -100,15 +167,26 @@ class _OneDriveExplorerState extends State<OneDriveExplorer> {
       _folderMetadata = null;
       _metadataError = null;
       _itemsStream = null; // Reiniciar stream de items mientras carga metadata
+      _isAtRealRoot = (folderId == null && driveId == null); // Actualiza si estamos en la raíz real
     });
     try {
       final graphService = Provider.of<GraphService>(context, listen: false);
-      _folderMetadata = await graphService.getFolderMetadataSummary(folderId: folderId, driveId: driveId);
-      // Una vez cargada la metadata, iniciamos la carga de items
+      final metadata = await graphService.getFolderMetadataSummary(folderId: folderId, driveId: driveId);
+      if (mounted) {
+        setState(() {
+          _folderMetadata = metadata;
+          // Actualizar _folderName con el nombre obtenido de los metadatos
+          // Si es la raíz, usar un nombre por defecto. Si es un favorito, su nombre ya está en _currentEntryPointInfo o se actualiza.
+          _folderName = metadata['name'] as String? ??
+              (folderId == null && driveId == null
+                  ? 'OneDrive Explorer'
+                  : _currentEntryPointInfo?.name ?? 'Carpeta');
+        });
+      }
       _itemsStream = _fetchItemsAsStream(folderId: folderId, driveId: driveId);
     } catch (e) {
       _metadataError = e.toString();
-      print("Error loading metadata: $e");
+      print("Error loading metadata: $e");      
     } finally {
       if (mounted) {
         setState(() {
@@ -117,6 +195,9 @@ class _OneDriveExplorerState extends State<OneDriveExplorer> {
       }
     }
   }
+
+
+
 
 
   List<dynamic> _buildDisplayList(
@@ -176,13 +257,8 @@ class _OneDriveExplorerState extends State<OneDriveExplorer> {
 
   Stream<List<dynamic>> _fetchItemsAsStream({String? folderId, String? driveId}) async* {
     final graphService = Provider.of<GraphService>(context, listen: false);
-    final token = await graphService.getToken();
-    if (token == null) {
-      yield [];
-      return;
-    }
-    final headers = {'Authorization': 'Bearer $token', 'Content-Type': 'application/json'};
     final String graphBaseUrl = "https://graph.microsoft.com/v1.0";
+    // El token y los headers serán manejados por _makeAuthenticatedGetRequest (o su equivalente en GraphService)
 
     String childrenUrl;
     if (driveId != null && folderId != null) {
@@ -197,21 +273,20 @@ class _OneDriveExplorerState extends State<OneDriveExplorer> {
     String? nextLinkChildren = childrenUrl;
 
     while (nextLinkChildren != null) {
-      final response = await http.get(Uri.parse(nextLinkChildren), headers: headers);
-      if (response.statusCode == 200) {
-        final jsonResponse = json.decode(response.body);
+      // Usar el método público de GraphService para realizar la solicitud autenticada.
+      final http.Response rawResponse = await graphService.sendAuthenticatedGetRequest(nextLinkChildren);
+
+      if (rawResponse.statusCode == 200) {
+        final jsonResponse = json.decode(rawResponse.body);
         final List<Map<String, dynamic>> currentPageRawItems = List.from(jsonResponse['value']);
         accumulatedRawItemsFromChildren.addAll(currentPageRawItems);
         yield _buildDisplayList(accumulatedRawItemsFromChildren, []);
         nextLinkChildren = jsonResponse['@odata.nextLink'];
-      } else if (response.statusCode == 401 && token != null) { // El token podría haber sido invalidado por el refresh
-        // El _makeAuthenticatedGetRequest dentro de _fetchItemsAsStream (si se usara allí) manejaría esto.
-        // Si no, y el refresh token falla, el usuario será deslogueado.
-        print('Error 401 obteniendo items de la carpeta, incluso después de posible refresh. El usuario debería ser deslogueado.');
-        throw Exception('Error de autenticación al obtener items de la carpeta.');
       } else {
-        print('Error al obtener items de la carpeta: ${response.statusCode} ${response.body}');
-        throw Exception('Error al obtener items de la carpeta: ${response.statusCode}');
+        // El error (incluyendo 401 no resuelto) debería ser manejado por sendAuthenticatedGetRequest
+        // o lanzar una excepción que el StreamBuilder pueda capturar.
+        print('Error al obtener items de la carpeta (después de posible reintento): ${rawResponse.statusCode} ${rawResponse.body}');
+        throw Exception('Error al obtener items de la carpeta: ${rawResponse.statusCode}');
       }
     }
 
@@ -220,9 +295,9 @@ class _OneDriveExplorerState extends State<OneDriveExplorer> {
       String? nextLinkShared = "$graphBaseUrl/me/drive/sharedWithMe?\$expand=thumbnails";
 
       while (nextLinkShared != null) {
-        final response = await http.get(Uri.parse(nextLinkShared), headers: headers);
-        if (response.statusCode == 200) {
-          final jsonResponse = json.decode(response.body);
+        final http.Response rawSharedResponse = await graphService.sendAuthenticatedGetRequest(nextLinkShared);
+        if (rawSharedResponse.statusCode == 200) {
+          final jsonResponse = json.decode(rawSharedResponse.body);
           final List<Map<String, dynamic>> currentPageSharedContainers = List.from(jsonResponse['value']);
           for (var container in currentPageSharedContainers) {
             if (container['remoteItem'] is Map<String, dynamic>) {
@@ -231,11 +306,8 @@ class _OneDriveExplorerState extends State<OneDriveExplorer> {
           }
           yield _buildDisplayList(accumulatedRawItemsFromChildren, accumulatedRawSharedRemoteItems);
           nextLinkShared = jsonResponse['@odata.nextLink'];
-        } else if (response.statusCode == 401 && token != null) {
-          print('Error 401 obteniendo items compartidos. El usuario debería ser deslogueado.');
-          throw Exception('Error de autenticación al obtener items compartidos.');
         } else {
-          print("Error al obtener archivos compartidos: ${response.statusCode} ${response.body}");
+          print("Error al obtener archivos compartidos (después de posible reintento): ${rawSharedResponse.statusCode} ${rawSharedResponse.body}");
           nextLinkShared = null;
         }
       }
@@ -252,146 +324,187 @@ class _OneDriveExplorerState extends State<OneDriveExplorer> {
 
   void _goBack() {
     if (_folderStack.isNotEmpty) {
-      _folderStack.removeLast();
-      OneDriveFolder? folder = _folderStack.isNotEmpty ? _folderStack.last : null;
-      _folderName = folder?.name;
-      String? folderId = folder?.id;
-      String? driveId = folder?.driveId;
       setState(() {
-        _loadMetadataAndItems(folderId: folderId, driveId: driveId);
+        _folderStack.removeLast(); // Quita la carpeta actual de la pila
+        if (_folderStack.isNotEmpty) {
+          // Si la pila aún tiene elementos, el último es la carpeta a la que volvemos
+          final parentFolderToDisplay = _folderStack.last;
+          // _folderName se actualizará por _loadMetadataAndItems
+          _loadMetadataAndItems(folderId: parentFolderToDisplay.id, driveId: parentFolderToDisplay.driveId);
+        } else {
+          // La pila está vacía, volvemos al punto de entrada original (raíz o favorito)
+          if (_currentEntryPointInfo != null) {
+            // _folderName se actualizará por _loadMetadataAndItems
+            _loadMetadataAndItems(folderId: _currentEntryPointInfo!.id, driveId: _currentEntryPointInfo!.driveId);
+          } else {
+            // El punto de entrada era la raíz real
+            // _folderName se actualizará por _loadMetadataAndItems
+            _loadMetadataAndItems(folderId: null, driveId: null);
+          }
+        }
       });
     }
   }
 
+  void _goToRoot() {
+    setState(() {
+      _currentEntryPointInfo = null; // La raíz es el nuevo punto de entrada
+      _folderStack.clear();
+      // _folderName se actualizará por _loadMetadataAndItems
+      // Cargar metadatos y elementos para la raíz (sin folderId ni driveId)
+      _loadMetadataAndItems();
+    });
+  }
+
   @override
   Widget build(BuildContext context) {
-    return Scaffold(
-      appBar: AppBar(
-        title: Text(_folderName ?? 'OneDrive Explorer'),
-        leading: _folderStack.isNotEmpty
-            ? IconButton(
-                icon: Icon(Icons.arrow_back),
-                onPressed: _goBack,
+    super.build(context); // Necesario para AutomaticKeepAliveClientMixin
+
+    return WillPopScope(
+      onWillPop: () async {
+        if (_folderStack.isNotEmpty) {
+          // Si hay una pila de navegación interna, maneja "Atrás" internamente.
+          _goBack();
+          return false; // Impide que Flutter haga pop de la ruta actual.
+        } else {
+          // La pila interna está vacía. Estamos en el nivel superior de la navegación actual.
+          // Comprueba si este nivel superior es la raíz real de OneDrive.
+          if (!_isAtRealRoot) {
+            // No estamos en la raíz real (ej. abrimos una subcarpeta desde favoritos).
+            // Navegar a la raíz real de OneDrive.
+            _goToRoot();
+            return false; // Impide que Flutter haga pop de la ruta actual.
+          }
+          // Estamos en la raíz real de OneDrive. Permite el comportamiento de pop normal.
+          return true; 
+        }
+      },
+      child: Scaffold(
+        appBar: AppBar(title: Text(_folderName ?? 'OneDrive Explorer'), leading: _folderStack.isNotEmpty ? IconButton(icon: Icon(Icons.arrow_back), onPressed: _goBack) : null, actions: [
+          Builder(
+            builder: (context) {
+              final appState = context.watch<MyAppState>();
+              FavoriteFolderIdentifier? currentFolderId = _getCurrentFolderIdentifier();
+              bool isCurrentFavorite = false;
+              if (currentFolderId != null) {
+                isCurrentFavorite = appState.isFavoriteFolder(currentFolderId);
+              }
+
+              return currentFolderId != null
+                  ? IconButton(
+                      icon: Icon(isCurrentFavorite ? Icons.favorite : Icons.favorite_border),
+                      tooltip: isCurrentFavorite ? 'Quitar de favoritos' : 'Añadir a favoritos',
+                      onPressed: () => appState.toggleFavoriteFolder(currentFolderId),
+                    )
+                  : SizedBox.shrink(); 
+            },          
+          ),
+          IconButton(
+            icon: Icon(Icons.home),
+            tooltip: 'Ir a la raíz de OneDrive',
+            onPressed: _goToRoot,
+          )
+        ]),
+        body: Column(
+          children: [
+            if (_isLoadingMetadata)
+              Padding(
+                padding: const EdgeInsets.all(8.0),
+                child: Center(child: CircularProgressIndicator(semanticsLabel: "Cargando metadatos...",)),
               )
-            : null,
-      ),
-      body: Column(
-        children: [
-          if (_isLoadingMetadata)
-            Padding(
-              padding: const EdgeInsets.all(8.0),
-              child: Center(child: CircularProgressIndicator(semanticsLabel: "Cargando metadatos...",)),
-            )
-          else if (_metadataError != null)
-            Padding(
-              padding: const EdgeInsets.all(8.0),
-              child: Text("Error al cargar metadatos: $_metadataError", style: TextStyle(color: Colors.red)),
-            )
-          else if (_folderMetadata != null)
-            // Padding(
-            //   padding: const EdgeInsets.all(8.0),
-            //   child: Wrap(
-            //     spacing: 8.0,
-            //     runSpacing: 4.0,
-            //     alignment: WrapAlignment.center,
-            //     children: [
-            //       Chip(label: Text('Total: ${_folderMetadata!['totalItems']}')),
-            //       if (_folderMetadata!['folderItems'] > 0)
-            //         Chip(label: Text('Carpetas: ${_folderMetadata!['folderItems']}')),
-            //       if (_folderMetadata!['imageItems'] > 0)
-            //         Chip(label: Text('Imágenes: ${_folderMetadata!['imageItems']}')),
-            //       if (_folderMetadata!['otherFileItems'] > 0)
-            //         Chip(label: Text('Archivos: ${_folderMetadata!['otherFileItems']}')),
-            //     ],
-            //   ),
-            // ),
-          Expanded(
-            child: _itemsStream == null && !_isLoadingMetadata
-                ? Center(child: Text(_metadataError == null ? "Iniciando carga de elementos..." : "No se pudieron cargar elementos."))
-                : StreamBuilder<List<dynamic>>(
-              stream: _itemsStream,
-              builder: (context, snapshot) {
-                if (snapshot.connectionState == ConnectionState.waiting && (!snapshot.hasData || snapshot.data!.isEmpty) && _itemsStream != null) {
-                  return Center(child: CircularProgressIndicator(semanticsLabel: "Cargando elementos..."));
-                } else if (snapshot.hasError) {
-                  return Center(child: Text('Error al cargar elementos: ${snapshot.error}'));
-                }
-
-                final items = snapshot.data ?? [];
-                final bool metadataAvailable = _folderMetadata != null;
-                final int totalExpectedItems = metadataAvailable ? (_folderMetadata!['totalItems'] ?? 0) : 0;
-                
-                final bool activelyLoadingMoreItems = snapshot.connectionState == ConnectionState.active &&
-                                                  metadataAvailable &&
-                                                  totalExpectedItems > 0 &&
-                                                  items.length < totalExpectedItems;
-
-                if (items.isEmpty) {
-                  if (snapshot.connectionState == ConnectionState.active) {
-                    if (metadataAvailable && totalExpectedItems > 0) {
-                      return Center(child: CircularProgressIndicator(semanticsLabel: "Cargando elementos..."));
-                    }
-                    if (metadataAvailable && totalExpectedItems == 0) {
-                      return Center(child: Text('Carpeta vacía'));
-                    }
+            else if (_metadataError != null)
+              Padding(
+                padding: const EdgeInsets.all(8.0),
+                child: Text("Error al cargar metadatos: $_metadataError", style: TextStyle(color: Colors.red)),
+              )
+            else if (_folderMetadata != null)
+              // Aquí iría el widget de metadatos si decides mostrarlo
+              Container(), // Placeholder si no se muestran metadatos directamente
+            Expanded(
+              child: _itemsStream == null && !_isLoadingMetadata
+                  ? Center(child: Text(_metadataError == null ? "Iniciando carga de elementos..." : "No se pudieron cargar elementos."))
+                  : StreamBuilder<List<dynamic>>(
+                key: ValueKey(_itemsStream), // Fuerza la recreación del estado del StreamBuilder si la instancia del stream cambia
+                stream: _itemsStream,
+                builder: (context, snapshot) {
+                  if (snapshot.connectionState == ConnectionState.waiting && (!snapshot.hasData || snapshot.data!.isEmpty) && _itemsStream != null) {
                     return Center(child: CircularProgressIndicator(semanticsLabel: "Cargando elementos..."));
-                  } else if (snapshot.connectionState == ConnectionState.done) {
-                    return Center(child: Text('Carpeta vacía'));
+                  } else if (snapshot.hasError) {
+                    return Center(child: Text('Error al cargar elementos: ${snapshot.error}'));
                   }
-                  return Center(child: CircularProgressIndicator(semanticsLabel: "Iniciando..."));
-                }
 
-                return Column(
-                  children: [
-                    if (activelyLoadingMoreItems)
-                      Padding(
-                        padding: const EdgeInsets.symmetric(vertical: 8.0, horizontal: 16.0),
-                        child: Column(
-                          children: [
-                            Text('Cargados: ${items.length} de $totalExpectedItems'),
-                            SizedBox(height: 4),
-                            LinearProgressIndicator(
-                              value: (totalExpectedItems > 0) ? items.length / totalExpectedItems : 0,
-                              backgroundColor: Colors.grey[300],
-                            ),
-                          ],
+                  final items = snapshot.data ?? [];
+                  final bool metadataAvailable = _folderMetadata != null;
+                  final int totalExpectedItems = metadataAvailable ? (_folderMetadata!['totalItems'] ?? 0) : 0;
+                  
+                  // Si no hay elementos y la conexión ha terminado, mostrar "Carpeta vacía"
+                  if (items.isEmpty && snapshot.connectionState == ConnectionState.done) {
+                     return Center(child: Text('Carpeta vacía'));
+                  }
+
+                  if (items.isEmpty && snapshot.connectionState == ConnectionState.active && !_isLoadingMetadata && totalExpectedItems > 0) {
+                    return Center(child: CircularProgressIndicator(semanticsLabel: "Cargando elementos..."));
+                  } else if (snapshot.hasError) {
+                    return Center(child: Text('Error al cargar elementos: ${snapshot.error}'));
+                  }
+
+                  final bool activelyLoadingMoreItems = snapshot.connectionState == ConnectionState.active &&
+                                                    metadataAvailable &&
+                                                    totalExpectedItems > 0 &&
+                                                    items.length < totalExpectedItems;
+
+                  return Column(
+                    children: [
+                      if (activelyLoadingMoreItems)
+                        Padding(
+                          padding: const EdgeInsets.symmetric(vertical: 8.0, horizontal: 16.0),
+                          child: Column(
+                            children: [
+                              Text('Cargados: ${items.length} de $totalExpectedItems'),
+                              SizedBox(height: 4),
+                              LinearProgressIndicator(
+                                value: (totalExpectedItems > 0) ? items.length / totalExpectedItems : 0,
+                                backgroundColor: Colors.grey[300],
+                              ),
+                            ],
+                          ),
+                        ),
+                      Expanded(
+                        child: ListView.builder(
+                          itemCount: items.length,
+                          itemBuilder: (context, index) {
+                            final item = items[index];
+                            if (item is OneDriveFolder) {
+                              return ListTile(
+                                leading: Icon(Icons.folder),
+                                title: Text(item.name),
+                                subtitle: Text('${item.childCount} elementos'),
+                                onTap: () => _enterFolder(item),
+                              );
+                            } else if (item is OneDriveFile) {
+                              return ListTile(
+                                leading: Icon(Icons.insert_drive_file),
+                                title: Text(item.name),
+                                subtitle: Text('${item.size} bytes'),
+                                onTap: () {
+                                  // Acción para archivos
+                                },
+                              );
+                            } else if (item is OneDriveGallery) {
+                              return OneDriveGalleryWidget(gallery: item);
+                            } else {
+                              return SizedBox.shrink();
+                            }
+                          }
                         ),
                       ),
-                    Expanded(
-                      child: ListView.builder(
-                        itemCount: items.length,
-                        itemBuilder: (context, index) {
-                          final item = items[index];
-                          if (item is OneDriveFolder) {
-                            return ListTile(
-                              leading: Icon(Icons.folder),
-                              title: Text(item.name),
-                              subtitle: Text('${item.childCount} elementos'),
-                              onTap: () => _enterFolder(item),
-                            );
-                          } else if (item is OneDriveFile) {
-                            return ListTile(
-                              leading: Icon(Icons.insert_drive_file),
-                              title: Text(item.name),
-                              subtitle: Text('${item.size} bytes'),
-                              onTap: () {
-                                // Acción para archivos
-                              },
-                            );
-                          } else if (item is OneDriveGallery) {
-                            return OneDriveGalleryWidget(gallery: item);
-                          } else {
-                            return SizedBox.shrink();
-                          }
-                        },
-                      ),
-                    ),
-                  ],
-                );
-              },
+                    ],
+                  );
+                },
+              ),
             ),
-          ),
-        ],
+          ],
+        ),
       ),
     );
   }
@@ -417,7 +530,7 @@ class OneDriveFolder {
       id: json['id'],
       name: json['name'],
       createdDateTime: DateTime.parse(json['createdDateTime']),
-      childCount: json['folder']?['childCount'] ?? 0,
+      childCount: json['folder']?['childCount'] ?? 0, // Asegúrate que esto es correcto para tus datos
       driveId: json['parentReference']?['driveId'] ?? json['remoteItem']?['parentReference']?['driveId'],
     );
   }

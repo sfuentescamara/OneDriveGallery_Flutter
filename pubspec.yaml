@@ -27,6 +27,8 @@ dependencies:
   permission_handler: ^11.0.0
   flutter_image_gallery_saver: ^0.0.2 
   video_player: ^2.8.1 #
+  intl: ^0.19.0 # Necesario para formatear fechas si no lo tienes ya
+  shared_preferences: ^2.2.3 # Guarada preferencias del usuario
 
 dev_dependencies:
   flutter_test:
