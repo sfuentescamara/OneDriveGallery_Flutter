@@ -3,6 +3,7 @@ import 'package:provider/provider.dart';
 import 'package:flutter_dotenv/flutter_dotenv.dart';
 import 'dart:convert'; // Para jsonEncode y jsonDecode
 import 'package:shared_preferences/shared_preferences.dart'; // Para SharedPreferences
+import 'package:intl/date_symbol_data_local.dart'; // Para inicializar datos de formato de fecha
  
 
 // Nuevas importaciones para los archivos separados
@@ -14,6 +15,7 @@ import 'drive_screen.dart';
 
 Future<void> main() async {
   await dotenv.load(fileName: ".env");
+  await initializeDateFormatting('es_ES', null); // Inicializar datos para español
   final authService = AuthService();
   final graphService = GraphService();
   graphService.init(authService); // Inyectamos AuthService

@@ -13,7 +13,13 @@ import 'dart:typed_data';
 import 'package:flutter_image_gallery_saver/flutter_image_gallery_saver.dart';
 import 'package:video_player/video_player.dart';
 import 'main.dart'; // Para MyAppState y FavoriteFolderIdentifier
+import 'package:intl/intl.dart'; // Para formateo de fechas
 
+// Enum para el modo de agrupación de la galería
+enum GroupingMode {
+  day,
+  month,
+}
 
 class DriveScreen extends StatelessWidget {
   @override
@@ -198,10 +204,6 @@ class _OneDriveExplorerState extends State<OneDriveExplorer> with AutomaticKeepA
     }
   }
 
-
-
-
-
   List<dynamic> _buildDisplayList(
     List<Map<String, dynamic>> childrenRawItems,
     List<Map<String, dynamic>> sharedRemoteRawItems,
@@ -234,9 +236,7 @@ class _OneDriveExplorerState extends State<OneDriveExplorer> with AutomaticKeepA
     // Create and add the single gallery object if there are media items
     if (mediaItemsForGallery.isNotEmpty) {
       OneDriveGallery gallery = OneDriveGallery.fromDriveItems(mediaItemsForGallery);
-      if (gallery.mediaByDate.isNotEmpty) {
-        processedItems.add(gallery);
-      }
+      processedItems.add(gallery); // Add the gallery object
     }
 
     // Sort all items together
@@ -633,11 +633,13 @@ class OneDriveVideo extends OneDrivePlayableMedia {
 
 
 class OneDriveGallery {
- final Map<String, List<OneDrivePlayableMedia>> mediaByDate;
-
-  OneDriveGallery({required this.mediaByDate});
+  final Map<String, List<OneDrivePlayableMedia>> mediaByDate; // Grouped by day by default
+  final List<Map<String, dynamic>> rawMediaItems; // Store raw items for flexible grouping
 
   factory OneDriveGallery.fromDriveItems(List<Map<String, dynamic>> items) {
+    // La agrupación inicial por día se sigue haciendo aquí para mantener la estructura
+    // de `mediaByDate` que el widget podría usar como estado inicial o fallback.
+    // La agrupación dinámica (día/mes) se manejará principalmente en `OneDriveGalleryWidget`.
     final Map<String, List<OneDrivePlayableMedia>> groupedMedia = {};
 
     for (var item in items) {
@@ -649,7 +651,7 @@ class OneDriveGallery {
       }
 
       if (mediaItem != null) {
-        final dateKey = "${mediaItem.takenDateTime.year}-${mediaItem.takenDateTime.month.toString().padLeft(2, '0')}-${mediaItem.takenDateTime.day.toString().padLeft(2, '0')}";
+        final dateKey = DateFormat('yyyy-MMM-dd', 'es_ES').format(mediaItem.takenDateTime);
         if (!groupedMedia.containsKey(dateKey)) {
           groupedMedia[dateKey] = [];
         }
@@ -660,8 +662,10 @@ class OneDriveGallery {
     groupedMedia.forEach((key, mediaList) {
       mediaList.sort((a, b) => a.takenDateTime.compareTo(b.takenDateTime)); // Antiguos primero
     });
-    return OneDriveGallery(mediaByDate: groupedMedia);
+    return OneDriveGallery(mediaByDate: groupedMedia, rawMediaItems: items); // Guardar también los items crudos
   }
+  OneDriveGallery({required this.mediaByDate, required this.rawMediaItems});
+
 }
 
 class OneDriveGalleryWidget extends StatefulWidget {
@@ -677,18 +681,89 @@ class _OneDriveGalleryWidgetState extends State<OneDriveGalleryWidget> {
   bool _isDateSortAscending = false; // false = descendente (más recientes primero), true = ascendente (más antiguas primero)
   Set<String> _expandedDates = {}; // Almacena las claves de fecha que están completamente expandidas
   static const int _initialImageLimit = 8;
+  late GroupingMode _groupingMode; // New state variable for grouping mode
+
+  @override
+  void initState() {
+    super.initState();
+    // Initialize grouping mode. Default to day.
+    _groupingMode = GroupingMode.day;
+  }
+
+  // Helper function to group and sort media items
+  Map<String, List<OneDrivePlayableMedia>> _groupAndSortMedia(List<Map<String, dynamic>> rawItems, GroupingMode mode) {
+    final Map<String, List<OneDrivePlayableMedia>> groupedMedia = {};
+
+    for (var item in rawItems) {
+      OneDrivePlayableMedia? mediaItem;
+      if (item.containsKey('image')) {
+        mediaItem = OneDriveImage.fromJson(item);
+      } else if (item.containsKey('video')) {
+        mediaItem = OneDriveVideo.fromJson(item);
+      }
+
+      if (mediaItem != null) {
+        String dateKey;
+        if (mode == GroupingMode.month) {
+          dateKey = DateFormat('yyyy-MMM', 'es_ES').format(mediaItem.takenDateTime); // Group by month
+        } else { // GroupingMode.day
+          dateKey = DateFormat('yyyy-MMM-dd', 'es_ES').format(mediaItem.takenDateTime); // Group by day
+        }
+        
+        if (!groupedMedia.containsKey(dateKey)) {
+          groupedMedia[dateKey] = [];
+        }
+        groupedMedia[dateKey]!.add(mediaItem);
+      }
+    }
+    // Sorting within groups is done later if needed, or keep it here. Let's keep it here.
+    groupedMedia.forEach((key, mediaList) {
+      mediaList.sort((a, b) => a.takenDateTime.compareTo(b.takenDateTime)); // Antiguos primero dentro del grupo
+    });
+    return groupedMedia;
+  }
 
   @override
   Widget build(BuildContext context) {
-    // Ordenar los grupos de fechas.
-    final sortedDateEntries = widget.gallery.mediaByDate.entries.toList()
+    // Group and sort media items based on current state
+    final groupedMedia = _groupAndSortMedia(widget.gallery.rawMediaItems, _groupingMode);
+
+    // Order the date group keys
+    final sortedDateEntries = groupedMedia.entries.toList()
       ..sort((a, b) {
         if (_isDateSortAscending) {
-          return a.key.compareTo(b.key); // Ascendente
+          // Parsear las claves a DateTime para una ordenación cronológica correcta
+          try {
+            DateTime dateA = DateFormat(_groupingMode == GroupingMode.month ? 'yyyy-MMM' : 'yyyy-MMM-dd', 'es_ES').parse(a.key);
+            DateTime dateB = DateFormat(_groupingMode == GroupingMode.month ? 'yyyy-MMM' : 'yyyy-MMM-dd', 'es_ES').parse(b.key);
+            return dateA.compareTo(dateB);
+          } catch (e) {
+            return a.key.compareTo(b.key); // Fallback a comparación de strings si el parseo falla
+          }
         } else {
-          return b.key.compareTo(a.key); // Descendente
+          try {
+            DateTime dateA = DateFormat(_groupingMode == GroupingMode.month ? 'yyyy-MMM' : 'yyyy-MMM-dd', 'es_ES').parse(a.key);
+            DateTime dateB = DateFormat(_groupingMode == GroupingMode.month ? 'yyyy-MMM' : 'yyyy-MMM-dd', 'es_ES').parse(b.key);
+            return dateB.compareTo(dateA);
+          } catch (e) {
+            return b.key.compareTo(a.key); // Fallback
+          }
         }
       });
+
+    // Función para formatear la cabecera de la fecha
+    String _getDisplayDateHeader(String dateKey) {
+      if (_groupingMode == GroupingMode.month) {
+        try {
+          // Parsea 'yyyy-MMM' y formatea a 'MMM, yyyy'
+          return DateFormat('MMM, yyyy', 'es_ES').format(DateFormat('yyyy-MMM', 'es_ES').parse(dateKey));
+        } catch (e) {
+          return dateKey; // Fallback si el parseo falla
+        }
+      }
+      // Para día, parsea 'yyyy-MMM-dd' y formatea a 'd MMM, yyyy'
+      return DateFormat('d MMM, yyyy', 'es_ES').format(DateFormat('yyyy-MMM-dd', 'es_ES').parse(dateKey));
+    }
 
     final IconData sortIcon = _isDateSortAscending ? Icons.arrow_downward : Icons.arrow_upward;
 
@@ -705,6 +780,31 @@ class _OneDriveGalleryWidgetState extends State<OneDriveGalleryWidget> {
               columns = value;
             });
           },
+        ),
+        Row(
+          mainAxisAlignment: MainAxisAlignment.center,
+          children: [
+            TextButton(
+              onPressed: () {
+                setState(() {
+                  _groupingMode = GroupingMode.day;
+                });
+              },
+              child: Text('Día'),
+              style: TextButton.styleFrom(
+                foregroundColor: _groupingMode == GroupingMode.day ? Theme.of(context).colorScheme.primary : Theme.of(context).textTheme.bodyMedium?.color,
+              ),
+            ),
+            TextButton(
+              onPressed: () {
+                setState(() {
+                  _groupingMode = GroupingMode.month;
+                });
+              },
+              child: Text('Mes'),
+              style: TextButton.styleFrom(foregroundColor: _groupingMode == GroupingMode.month ? Theme.of(context).colorScheme.primary : Theme.of(context).textTheme.bodyMedium?.color),
+            ),
+          ],
         ),
         TextButton.icon(
           icon: Icon(sortIcon),
@@ -730,8 +830,9 @@ class _OneDriveGalleryWidgetState extends State<OneDriveGalleryWidget> {
             children: [
               Padding(
                 padding: const EdgeInsets.symmetric(vertical: 8.0, horizontal: 16),
-                child: Text("$date (${mediaItems.length} ${mediaItems.length == 1 ? 'elemento' : 'elementos'})",
-                    style: TextStyle(fontWeight: FontWeight.bold, fontSize: 16)),
+                child: Text("${_getDisplayDateHeader(date)} (${mediaItems.length} ${mediaItems.length == 1 ? 'elemento' : 'elementos'})",
+                //     style: TextStyle(fontWeight: FontWeight.bold, fontSize: 16)
+                ),
               ),
               GridView.builder(
                 shrinkWrap: true,
